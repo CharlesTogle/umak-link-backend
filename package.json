@@ -1,0 +1,52 @@
+{
+  "name": "umak-link-backend",
+  "version": "1.0.0",
+  "description": "Fastify BFF backend for UMak-LINK lost-and-found system",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "keywords": [
+    "fastify",
+    "supabase",
+    "bff",
+    "lost-and-found"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@supabase/supabase-js": "^2.48.0",
+    "fastify": "^5.2.0",
+    "@fastify/cors": "^10.0.0",
+    "@fastify/helmet": "^13.0.0",
+    "@fastify/rate-limit": "^10.0.0",
+    "google-auth-library": "^9.15.0",
+    "jsonwebtoken": "^9.0.2",
+    "firebase-admin": "^13.0.0",
+    "resend": "^4.0.0",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.15.2",
+    "typescript": "^5.8.3",
+    "tsx": "^4.19.4",
+    "@eslint/js": "^9.26.0",
+    "eslint": "^9.26.0",
+    "typescript-eslint": "^8.32.0",
+    "prettier": "^3.5.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

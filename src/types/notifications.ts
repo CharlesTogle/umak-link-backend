@@ -27,7 +27,7 @@ export interface SendGlobalAnnouncementRequest {
 }
 
 export interface AnnouncementRecord {
-  global_notification_id: number;
+  id: number;
   message: string;
   description: string | null;
   created_at: string;

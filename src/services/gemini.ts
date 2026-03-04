@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import logger from '../utils/logger.js';
+import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 interface RateLimiter {
   tokens: number;
@@ -67,7 +68,11 @@ class GeminiService {
 
     try {
       const prompt = this.buildPrompt(item);
-      const result = await this.model.generateContent(prompt);
+      const result = await withTimeout(
+        this.model.generateContent(prompt),
+        DEFAULT_TIMEOUT_MS,
+        'Gemini generateContent'
+      );
       const response = result.response;
       const text = response.text();
 

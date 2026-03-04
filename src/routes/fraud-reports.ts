@@ -7,23 +7,109 @@ import {
   FraudReportResolveRequest,
 } from '../types/fraud-reports.js';
 import logger from '../utils/logger.js';
+import { parsePagination } from '../utils/pagination.js';
 
 export default async function fraudReportsRoutes(server: FastifyInstance) {
-  // POST /fraud-reports - Create fraud report
-  server.post<{ Body: FraudReportCreateRequest }>(
-    '/',
+  // GET /fraud-reports/check-duplicates - Check for duplicate reports
+  server.get<{
+    Querystring: {
+      post_id: string;
+      user_id: string;
+      concern?: string;
+    };
+  }>(
+    '/check-duplicates',
     {
       preHandler: [requireAuth],
     },
     async (request) => {
       const supabase = getSupabaseClient();
+      const { post_id, user_id, concern } = request.query;
+
+      const postIdNum = parseInt(post_id, 10);
+
+      // Check if the same user already reported this post
+      let selfQuery = supabase
+        .from('fraud_reports_table')
+        .select('report_id', { count: 'exact', head: true })
+        .eq('post_id', postIdNum)
+        .eq('reported_by', user_id);
+
+      if (concern) {
+        selfQuery = selfQuery.eq('reason_for_reporting', concern);
+      }
+
+      const { count: selfCount, error: selfError } = await selfQuery;
+
+      if (selfError) {
+        logger.error({ error: selfError, post_id, user_id }, 'Failed to check self duplicates');
+        throw new Error('Failed to check duplicates');
+      }
+
+      // Check if other users have reported this post
+      let othersQuery = supabase
+        .from('fraud_reports_table')
+        .select('report_id', { count: 'exact', head: true })
+        .eq('post_id', postIdNum)
+        .neq('reported_by', user_id);
+
+      if (concern) {
+        othersQuery = othersQuery.eq('reason_for_reporting', concern);
+      }
+
+      const { count: othersCount, error: othersError } = await othersQuery;
+
+      if (othersError) {
+        logger.error({ error: othersError, post_id, user_id }, 'Failed to check others duplicates');
+        throw new Error('Failed to check duplicates');
+      }
+
+      return {
+        has_duplicate_self: (selfCount || 0) > 0,
+        has_duplicate_others: (othersCount || 0) > 0,
+      };
+    }
+  );
+
+  // POST /fraud-reports - Create fraud report
+  server.post<{ Body: FraudReportCreateRequest }>(
+    '/',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['post_id', 'reason'],
+          properties: {
+            post_id: { type: 'number' },
+            reason: { type: 'string', minLength: 1 },
+            proof_image_url: { type: ['string', 'null'] },
+            reported_by: { type: ['string', 'null'] },
+            claim_id: { type: ['string', 'null'] },
+            claimer_name: { type: ['string', 'null'] },
+            claimer_school_email: { type: ['string', 'null'] },
+            claimer_contact_num: { type: ['string', 'null'] },
+            claimed_at: { type: ['string', 'null'] },
+            claim_processed_by_staff_id: { type: ['string', 'null'] },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request) => {
+      const supabase = getSupabaseClient();
       const body = request.body;
+      const reporterId = request.user?.user_id;
+
+      if (!reporterId) {
+        throw new Error('Unauthorized');
+      }
 
       const { data, error } = await supabase.rpc('create_or_get_fraud_report', {
         p_post_id: body.post_id,
         p_reason: body.reason,
         p_proof_image_url: body.proof_image_url,
-        p_reported_by: body.reported_by,
+        p_reported_by: reporterId,
         p_claim_id: body.claim_id,
         p_claimer_name: body.claimer_name,
         p_claimer_school_email: body.claimer_school_email,
@@ -85,8 +171,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const { limit, offset, exclude, ids, sort } = request.query;
 
-      const limitNum = Math.min(limit ? parseInt(limit, 10) : 20, 100);
-      const offsetNum = offset ? parseInt(offset, 10) : 0;
+      const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
       const sortDirection = sort === 'asc';
 
       let query = supabase
@@ -205,6 +290,31 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       logger.info({ reportId }, 'Fraud report resolved');
       return { success: true, data };
+    }
+  );
+
+  // DELETE /fraud-reports/:id - Delete fraud report
+  server.delete<{ Params: { id: string } }>(
+    '/:id',
+    {
+      preHandler: [requireStaff],
+    },
+    async (request) => {
+      const supabase = getSupabaseClient();
+      const reportId = request.params.id;
+
+      const { error } = await supabase
+        .from('fraud_reports_table')
+        .delete()
+        .eq('report_id', reportId);
+
+      if (error) {
+        logger.error({ error, reportId }, 'Failed to delete fraud report');
+        throw new Error(error.message || 'Failed to delete fraud report');
+      }
+
+      logger.info({ reportId }, 'Fraud report deleted');
+      return { success: true };
     }
   );
 }

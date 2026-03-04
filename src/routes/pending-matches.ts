@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../services/supabase.js';
 import { requireStaff } from '../middleware/auth.js';
 import logger from '../utils/logger.js';
+import { parsePagination } from '../utils/pagination.js';
 
 interface PendingMatchCreateRequest {
   post_id: number;
@@ -17,6 +18,20 @@ export default async function pendingMatchesRoutes(server: FastifyInstance) {
     '/',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['post_id', 'poster_id', 'status', 'is_retriable'],
+          properties: {
+            post_id: { type: 'number' },
+            poster_id: { type: 'string', minLength: 1 },
+            status: { type: 'string', minLength: 1 },
+            is_retriable: { type: 'boolean' },
+            failed_reason: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -55,13 +70,22 @@ export default async function pendingMatchesRoutes(server: FastifyInstance) {
     '/',
     {
       preHandler: [requireStaff],
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'string' },
+            offset: { type: 'string' },
+            status: { type: 'string' },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
       const { limit, offset, status } = request.query;
 
-      const limitNum = Math.min(limit ? parseInt(limit, 10) : 20, 100);
-      const offsetNum = offset ? parseInt(offset, 10) : 0;
+      const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       let query = supabase
         .from('pending_match')
@@ -92,6 +116,23 @@ export default async function pendingMatchesRoutes(server: FastifyInstance) {
     '/:id/status',
     {
       preHandler: [requireStaff],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+          },
+        },
+        body: {
+          type: 'object',
+          required: ['status'],
+          properties: {
+            status: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();

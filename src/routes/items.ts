@@ -9,6 +9,15 @@ export default async function itemsRoutes(server: FastifyInstance) {
     '/:id',
     {
       preHandler: [requireStaff],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -37,6 +46,23 @@ export default async function itemsRoutes(server: FastifyInstance) {
     '/:id/metadata',
     {
       preHandler: [requireStaff],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+          },
+        },
+        body: {
+          type: 'object',
+          required: ['item_metadata'],
+          properties: {
+            item_metadata: { type: 'object' },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();

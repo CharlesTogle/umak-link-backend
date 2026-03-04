@@ -13,7 +13,20 @@ function verifySystemToken(token: string | undefined): boolean {
 
 export default async function jobsRoutes(server: FastifyInstance) {
   // POST /jobs/metadata-batch - Generate metadata for pending items
-  server.post('/metadata-batch', async (request): Promise<GenerateMetadataBatchResponse> => {
+  server.post(
+    '/metadata-batch',
+    {
+      schema: {
+        headers: {
+          type: 'object',
+          required: ['authorization'],
+          properties: {
+            authorization: { type: 'string', minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request): Promise<GenerateMetadataBatchResponse> => {
     if (!verifySystemToken(request.headers.authorization)) {
       throw new Error('Unauthorized');
     }
@@ -66,7 +79,20 @@ export default async function jobsRoutes(server: FastifyInstance) {
   });
 
   // POST /jobs/pending-match - Match lost/found items
-  server.post('/pending-match', async (request): Promise<ProcessPendingMatchResponse> => {
+  server.post(
+    '/pending-match',
+    {
+      schema: {
+        headers: {
+          type: 'object',
+          required: ['authorization'],
+          properties: {
+            authorization: { type: 'string', minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request): Promise<ProcessPendingMatchResponse> => {
     if (!verifySystemToken(request.headers.authorization)) {
       throw new Error('Unauthorized');
     }
@@ -89,5 +115,6 @@ export default async function jobsRoutes(server: FastifyInstance) {
       timed_out: false,
       rate_limit_stopped: false,
     };
-  });
+    }
+  );
 }

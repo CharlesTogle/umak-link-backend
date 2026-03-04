@@ -1,6 +1,7 @@
 import admin from 'firebase-admin';
 import logger from '../utils/logger.js';
 import { getSupabaseClient } from './supabase.js';
+import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 let firebaseInitialized = false;
 
@@ -74,7 +75,11 @@ export async function sendPushNotification(
       },
     };
 
-    await admin.messaging().send(message);
+    await withTimeout(
+      admin.messaging().send(message),
+      DEFAULT_TIMEOUT_MS,
+      'Firebase send'
+    );
     logger.info({ userId: payload.user_id, type: payload.type }, 'Push notification sent');
     return true;
   } catch (error) {

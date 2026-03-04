@@ -10,6 +10,15 @@ export default async function usersRoutes(server: FastifyInstance) {
     '/:id',
     {
       preHandler: [requireStaff],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -35,6 +44,15 @@ export default async function usersRoutes(server: FastifyInstance) {
     '/search',
     {
       preHandler: [requireStaff],
+      schema: {
+        querystring: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', minLength: 1 },
+          },
+        },
+      },
     },
     async (request): Promise<UserSearchResponse> => {
       const supabase = getSupabaseClient();

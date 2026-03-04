@@ -21,6 +21,28 @@ export default async function searchRoutes(server: FastifyInstance) {
     '/items',
     {
       preHandler: [requireAuth],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', minLength: 1 },
+            limit: { type: 'number', minimum: 1, maximum: 100 },
+            last_seen_date: { type: ['string', 'null'] },
+            category: { type: ['array', 'null'], items: { type: 'string' } },
+            location_last_seen: { type: ['string', 'null'] },
+            claim_from: { type: ['string', 'null'] },
+            claim_to: { type: ['string', 'null'] },
+            item_status: {
+              type: ['array', 'null'],
+              items: { type: 'string', enum: ['claimed', 'unclaimed', 'discarded', 'returned', 'lost'] },
+            },
+            sort: { type: 'string', enum: ['submission_date'] },
+            sort_direction: { type: 'string', enum: ['asc', 'desc'] },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -53,6 +75,28 @@ export default async function searchRoutes(server: FastifyInstance) {
     '/items/staff',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', minLength: 1 },
+            limit: { type: 'number', minimum: 1, maximum: 100 },
+            last_seen_date: { type: ['string', 'null'] },
+            category: { type: ['array', 'null'], items: { type: 'string' } },
+            location_last_seen: { type: ['string', 'null'] },
+            claim_from: { type: ['string', 'null'] },
+            claim_to: { type: ['string', 'null'] },
+            item_status: {
+              type: ['array', 'null'],
+              items: { type: 'string', enum: ['claimed', 'unclaimed', 'discarded', 'returned', 'lost'] },
+            },
+            sort: { type: 'string', enum: ['accepted_on_date', 'submission_date'] },
+            sort_direction: { type: 'string', enum: ['asc', 'desc'] },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();

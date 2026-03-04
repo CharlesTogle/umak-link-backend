@@ -26,6 +26,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
   } catch (error) {
     logger.debug({ error }, 'Invalid token');
     reply.status(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+    return;
   }
 }
 

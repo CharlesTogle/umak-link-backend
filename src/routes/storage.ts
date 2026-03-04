@@ -19,6 +19,18 @@ export default async function storageRoutes(server: FastifyInstance) {
     '/upload-url',
     {
       preHandler: [requireAuth],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['bucket', 'fileName', 'contentType'],
+          properties: {
+            bucket: { type: 'string', enum: ['items', 'profilePictures'] },
+            fileName: { type: 'string', minLength: 1 },
+            contentType: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const { bucket, fileName, contentType } = request.body;
@@ -40,6 +52,17 @@ export default async function storageRoutes(server: FastifyInstance) {
     '/confirm-upload',
     {
       preHandler: [requireAuth],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['bucket', 'objectPath'],
+          properties: {
+            bucket: { type: 'string', enum: ['items', 'profilePictures'] },
+            objectPath: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const { bucket, objectPath } = request.body;
@@ -61,6 +84,17 @@ export default async function storageRoutes(server: FastifyInstance) {
     '/',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['bucket', 'objectPath'],
+          properties: {
+            bucket: { type: 'string', enum: ['items', 'profilePictures'] },
+            objectPath: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const { bucket, objectPath } = request.body;

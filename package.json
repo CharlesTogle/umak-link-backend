@@ -11,7 +11,8 @@
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write \"src/**/*.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "JWT_SECRET=test_secret_for_tests tsx --test src/**/*.test.ts"
   },
   "packageManager": "pnpm@9.0.0",
   "keywords": [

@@ -11,6 +11,19 @@ export default async function announcementsRoutes(server: FastifyInstance) {
     '/send',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['user_id', 'message'],
+          properties: {
+            user_id: { type: 'string', minLength: 1 },
+            message: { type: 'string', minLength: 1 },
+            description: { type: ['string', 'null'] },
+            image_url: { type: ['string', 'null'] },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const { user_id, message, description, image_url } = request.body;
@@ -26,27 +39,39 @@ export default async function announcementsRoutes(server: FastifyInstance) {
     }
   );
 
-  // GET /announcements - List announcements
-  server.get(
+  // GET /announcements - List announcements with pagination
+  server.get<{
+    Querystring: { limit?: number; offset?: number };
+  }>(
     '/',
     {
       preHandler: [requireAuth],
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number', minimum: 1, maximum: 100 },
+            offset: { type: 'number', minimum: 0 },
+          },
+        },
+      },
     },
-    async (): Promise<{ announcements: AnnouncementRecord[] }> => {
+    async (request): Promise<{ announcements: AnnouncementRecord[]; count: number }> => {
       const supabase = getSupabaseClient();
+      const { limit = 30, offset = 0 } = request.query;
 
-      const { data, error } = await supabase
-        .from('global_announcements_table')
-        .select('*')
+      const { data, count, error } = await supabase
+        .from('global_announcement_view')
+        .select('id, created_at, message, description, image_url', { count: 'exact' })
         .order('created_at', { ascending: false })
-        .limit(50);
+        .range(offset, offset + limit - 1);
 
       if (error) {
         logger.error({ error }, 'Failed to fetch announcements');
         throw new Error('Failed to fetch announcements');
       }
 
-      return { announcements: data || [] };
+      return { announcements: data || [], count: count || 0 };
     }
   );
 }

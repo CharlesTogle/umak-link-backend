@@ -22,6 +22,18 @@ export default async function authRoutes(server: FastifyInstance) {
   // POST /auth/google - Login with Google ID token
   server.post<{ Body: AuthLoginRequest }>(
     '/google',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['googleIdToken'],
+          properties: {
+            googleIdToken: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
     async (request, reply): Promise<AuthLoginResponse> => {
       const { googleIdToken } = request.body;
 
@@ -112,6 +124,16 @@ export default async function authRoutes(server: FastifyInstance) {
     '/me',
     {
       preHandler: [requireAuth],
+      schema: {
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              user: { type: 'object' },
+            },
+          },
+        },
+      },
     },
     async (request: FastifyRequest, reply): Promise<AuthMeResponse> => {
       if (!request.user) {

@@ -1,5 +1,7 @@
 import { getSupabaseClient } from './supabase.js';
 import logger from '../utils/logger.js';
+import crypto from 'node:crypto';
+import path from 'node:path';
 
 const ITEMS_BUCKET = process.env.ITEMS_BUCKET || 'items';
 const PROFILE_PICTURES_BUCKET = process.env.PROFILE_PICTURES_BUCKET || 'profilePictures';
@@ -18,7 +20,10 @@ export async function generateSignedUploadUrl(
 ): Promise<SignedUploadUrl> {
   const supabase = getSupabaseClient();
   const bucketName = bucket === 'items' ? ITEMS_BUCKET : PROFILE_PICTURES_BUCKET;
-  const objectPath = `${Date.now()}-${fileName}`;
+  const ext = path.extname(fileName).toLowerCase();
+  const safeExt =
+    ext && ext.length <= 10 && /^[a-z0-9.]+$/.test(ext) ? ext : '';
+  const objectPath = `${Date.now()}-${crypto.randomUUID()}${safeExt}`;
 
   const { data, error } = await supabase.storage
     .from(bucketName)

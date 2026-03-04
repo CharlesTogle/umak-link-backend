@@ -10,6 +10,36 @@ export default async function claimsRoutes(server: FastifyInstance) {
     '/process',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['found_post_id', 'claim_details'],
+          properties: {
+            found_post_id: { type: 'number' },
+            missing_post_id: { type: ['number', 'null'] },
+            claim_details: {
+              type: 'object',
+              required: [
+                'claimer_name',
+                'claimer_school_email',
+                'claimer_contact_num',
+                'poster_name',
+                'staff_id',
+                'staff_name',
+              ],
+              properties: {
+                claimer_name: { type: 'string', minLength: 1 },
+                claimer_school_email: { type: 'string', minLength: 1 },
+                claimer_contact_num: { type: 'string', minLength: 1 },
+                poster_name: { type: 'string', minLength: 1 },
+                staff_id: { type: 'string', minLength: 1 },
+                staff_name: { type: 'string', minLength: 1 },
+              },
+            },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();

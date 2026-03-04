@@ -11,6 +11,22 @@ export default async function notificationsRoutes(server: FastifyInstance) {
     '/send',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['user_id', 'title', 'body', 'type'],
+          properties: {
+            user_id: { type: 'string', minLength: 1 },
+            title: { type: 'string', minLength: 1 },
+            body: { type: 'string', minLength: 1 },
+            description: { type: ['string', 'null'] },
+            type: { type: 'string', minLength: 1 },
+            data: { type: 'object' },
+            image_url: { type: ['string', 'null'] },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const notificationId = await createNotification(request.body);

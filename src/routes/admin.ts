@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../services/supabase.js';
 import { requireAdmin, requireStaff } from '../middleware/auth.js';
 import { DashboardStats } from '../types/search.js';
 import logger from '../utils/logger.js';
+import { parsePagination } from '../utils/pagination.js';
 
 export default async function adminRoutes(server: FastifyInstance) {
   // GET /admin/users - List users with filters
@@ -14,6 +15,14 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/users',
     {
       preHandler: [requireAdmin],
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {
+            user_type: { type: 'string' },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -51,6 +60,24 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/users/:id/role',
     {
       preHandler: [requireAdmin],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+          },
+        },
+        body: {
+          type: 'object',
+          required: ['role'],
+          properties: {
+            role: { type: 'string', enum: ['User', 'Staff', 'Admin'] },
+            previous_role: { type: 'string', enum: ['User', 'Staff', 'Admin'] },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -119,6 +146,20 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/audit-logs',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['user_id', 'action', 'table_name', 'record_id', 'changes'],
+          properties: {
+            user_id: { type: 'string', minLength: 1 },
+            action: { type: 'string', minLength: 1 },
+            table_name: { type: 'string', minLength: 1 },
+            record_id: { type: 'string', minLength: 1 },
+            changes: { type: 'object' },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -146,17 +187,26 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/audit-logs',
     {
       preHandler: [requireAdmin],
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number', minimum: 1, maximum: 100 },
+            offset: { type: 'number', minimum: 0 },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
-      const limitNum = Math.min(limit, 100);
+      const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       const { data, error } = await supabase
         .from('audit_table')
         .select('*, user_table(*)')
         .order('timestamp', { ascending: false })
-        .range(offset, offset + limitNum - 1);
+        .range(offsetNum, offsetNum + limitNum - 1);
 
       if (error) {
         logger.error({ error }, 'Failed to fetch audit logs');
@@ -172,6 +222,15 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/audit-logs/:id',
     {
       preHandler: [requireAdmin],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string', minLength: 1 },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
@@ -197,19 +256,35 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/audit-logs/user/:userId',
     {
       preHandler: [requireStaff],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['userId'],
+          properties: {
+            userId: { type: 'string', minLength: 1 },
+          },
+        },
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number', minimum: 1, maximum: 100 },
+            offset: { type: 'number', minimum: 0 },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
       const userId = request.params.userId;
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
-      const limitNum = Math.min(limit, 100);
+      const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       const { data, error } = await supabase
         .from('audit_table')
         .select('*, user_table(*)')
         .eq('user_id', userId)
         .order('timestamp', { ascending: false })
-        .range(offset, offset + limitNum - 1);
+        .range(offsetNum, offsetNum + limitNum - 1);
 
       if (error) {
         logger.error({ error, userId }, 'Failed to fetch user audit logs');
@@ -225,19 +300,35 @@ export default async function adminRoutes(server: FastifyInstance) {
     '/audit-logs/action/:actionType',
     {
       preHandler: [requireAdmin],
+      schema: {
+        params: {
+          type: 'object',
+          required: ['actionType'],
+          properties: {
+            actionType: { type: 'string', minLength: 1 },
+          },
+        },
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number', minimum: 1, maximum: 100 },
+            offset: { type: 'number', minimum: 0 },
+          },
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
       const actionType = request.params.actionType;
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
-      const limitNum = Math.min(limit, 100);
+      const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       const { data, error } = await supabase
         .from('audit_table')
         .select('*, user_table(*)')
         .eq('action', actionType)
         .order('timestamp', { ascending: false })
-        .range(offset, offset + limitNum - 1);
+        .range(offsetNum, offsetNum + limitNum - 1);
 
       if (error) {
         logger.error({ error, actionType }, 'Failed to fetch audit logs by action');
@@ -247,4 +338,148 @@ export default async function adminRoutes(server: FastifyInstance) {
       return { logs: data || [] };
     }
   );
+
+  // GET /admin/stats/weekly - Weekly statistics for chart
+  server.get(
+    '/stats/weekly',
+    {
+      preHandler: [requireAdmin],
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    },
+    async () => {
+      const supabase = getSupabaseClient();
+      const weeks: string[] = [];
+      const missing: number[] = [];
+      const found: number[] = [];
+      const reports: number[] = [];
+      const pending: number[] = [];
+
+      const today = new Date();
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+      // Build promises for all 12 weeks of data
+      const promises = [];
+
+      for (let i = 11; i >= 0; i--) {
+        const weekStart = new Date(today);
+        weekStart.setDate(weekStart.getDate() - weekStart.getDay() - i * 7);
+        weekStart.setHours(0, 0, 0, 0);
+
+        const weekEnd = new Date(weekStart);
+        weekEnd.setDate(weekEnd.getDate() + 6);
+        weekEnd.setHours(23, 59, 59, 999);
+
+        const weekLabel = `${monthNames[weekStart.getMonth()]} ${weekStart.getDate()}`;
+        weeks.push(weekLabel);
+
+        promises.push(
+          Promise.all([
+            supabase
+              .from('post_public_view')
+              .select('*', { count: 'exact', head: true })
+              .eq('item_type', 'missing')
+              .gte('submission_date', weekStart.toISOString())
+              .lte('submission_date', weekEnd.toISOString()),
+            supabase
+              .from('post_public_view')
+              .select('*', { count: 'exact', head: true })
+              .eq('item_type', 'found')
+              .gte('submission_date', weekStart.toISOString())
+              .lte('submission_date', weekEnd.toISOString()),
+            supabase
+              .from('fraud_reports_table')
+              .select('*', { count: 'exact', head: true })
+              .in('report_status', ['open', 'under_review'])
+              .gte('date_reported', weekStart.toISOString())
+              .lte('date_reported', weekEnd.toISOString()),
+            supabase
+              .from('post_public_view')
+              .select('*', { count: 'exact', head: true })
+              .eq('post_status', 'pending')
+              .gte('submission_date', weekStart.toISOString())
+              .lte('submission_date', weekEnd.toISOString()),
+          ])
+        );
+      }
+
+      const results = await Promise.all(promises);
+
+      results.forEach(([missingRes, foundRes, reportsRes, pendingRes]) => {
+        missing.push(missingRes.count || 0);
+        found.push(foundRes.count || 0);
+        reports.push(reportsRes.count || 0);
+        pending.push(pendingRes.count || 0);
+      });
+
+      return { weeks, series: { missing, found, reports, pending } };
+    }
+  );
+
+  // GET /admin/stats/export - Export data for CSV
+  server.get<{
+    Querystring: { start_date: string; end_date: string };
+  }>(
+    '/stats/export',
+    {
+      preHandler: [requireAdmin],
+      schema: {
+        querystring: {
+          type: 'object',
+          required: ['start_date', 'end_date'],
+          properties: {
+            start_date: { type: 'string', minLength: 1 },
+            end_date: { type: 'string', minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const supabase = getSupabaseClient();
+      const { start_date, end_date } = request.query;
+
+      if (!start_date || !end_date) {
+        throw new Error('start_date and end_date are required');
+      }
+
+      const { data, error } = await supabase
+        .from('post_public_view')
+        .select(
+          'poster_name,item_name,item_description,last_seen_location,accepted_by_staff_name,submission_date,claimed_by_name,claimed_by_email,accepted_on_date'
+        )
+        .gte('submission_date', start_date)
+        .lte('submission_date', end_date);
+
+      if (error) {
+        logger.error({ error }, 'Failed to fetch export data');
+        throw new Error('Failed to fetch export data');
+      }
+
+      const rows = (data || []).map((row) => ({
+        poster_name: escapeCsvValue(row.poster_name),
+        item_name: escapeCsvValue(row.item_name),
+        item_description: escapeCsvValue(row.item_description),
+        last_seen_location: escapeCsvValue(row.last_seen_location),
+        accepted_by_staff_name: escapeCsvValue(row.accepted_by_staff_name),
+        submission_date: escapeCsvValue(row.submission_date),
+        claimed_by_name: escapeCsvValue(row.claimed_by_name),
+        claimed_by_email: escapeCsvValue(row.claimed_by_email),
+        accepted_on_date: escapeCsvValue(row.accepted_on_date),
+      }));
+
+      return { rows };
+    }
+  );
+}
+
+function escapeCsvValue(value: string | null): string | null {
+  if (value === null) return null;
+  if (value.startsWith('=') || value.startsWith('+') || value.startsWith('-') || value.startsWith('@')) {
+    return `'${value}`;
+  }
+  return value;
 }

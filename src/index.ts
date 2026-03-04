@@ -19,9 +19,37 @@ import usersRoutes from './routes/users.js';
 import adminRoutes from './routes/admin.js';
 import itemsRoutes from './routes/items.js';
 import pendingMatchesRoutes from './routes/pending-matches.js';
+import emailRoutes from './routes/email.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || '';
+const ALLOWED_ORIGIN_LIST = ALLOWED_ORIGINS.split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+function validateStartupConfig() {
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    logger.error('Missing GOOGLE_CLIENT_ID. Google authentication will fail.');
+  }
+
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    logger.error('Missing JWT_SECRET. Server startup will fail where JWT is required.');
+  } else if (jwtSecret.length < 32 || jwtSecret === 'replace_with_strong_secret') {
+    logger.warn('JWT_SECRET appears weak or default. Use a long random secret in non-local environments.');
+  }
+
+  if (ALLOWED_ORIGIN_LIST.length === 0) {
+    logger.error('Missing ALLOWED_ORIGINS. Configure comma-separated allowed origins.');
+  }
+
+  if (ALLOWED_ORIGIN_LIST.includes('*')) {
+    logger.error('ALLOWED_ORIGINS contains *. This is not allowed for authenticated APIs.');
+  }
+}
+
+validateStartupConfig();
 
 const server = Fastify({
   logger: logger,
@@ -36,7 +64,19 @@ await server.register(helmet, {
 });
 
 await server.register(cors, {
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: (origin, callback) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (ALLOWED_ORIGIN_LIST.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('CORS origin not allowed'), false);
+  },
   credentials: true,
 });
 
@@ -68,6 +108,7 @@ await server.register(usersRoutes, { prefix: '/users' });
 await server.register(adminRoutes, { prefix: '/admin' });
 await server.register(itemsRoutes, { prefix: '/items' });
 await server.register(pendingMatchesRoutes, { prefix: '/pending-matches' });
+await server.register(emailRoutes, { prefix: '/email' });
 
 // Error handler
 server.setErrorHandler(errorHandler);

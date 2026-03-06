@@ -1,9 +1,10 @@
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { OAuth2Client } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
+import sharp from 'sharp';
 import { getSupabaseClient } from '../services/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
-import { AuthLoginRequest, AuthLoginResponse, AuthMeResponse, UserProfile } from '../types/auth.js';
+import { AuthLoginRequest, AuthLoginResponse, AuthMeResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
 
 const JWT_SECRET: string = (() => {
@@ -15,8 +16,58 @@ const JWT_SECRET: string = (() => {
 })();
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin'];
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+
+function isAllowedUserType(value: unknown): value is UserType {
+  return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
+}
+
+async function uploadProfilePicture(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  userId: string,
+  imageUrl: string
+): Promise<string | null> {
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      logger.warn({ status: response.status }, 'Failed to fetch Google profile image');
+      return null;
+    }
+
+    const sourceBuffer = Buffer.from(await response.arrayBuffer());
+    const webpBuffer = await sharp(sourceBuffer)
+      .resize({
+        width: 400,
+        height: 400,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({ quality: 80 })
+      .toBuffer();
+
+    const fileName = `${Date.now()}_thumb.webp`;
+    const path = `users/${userId}/${fileName}`;
+
+    const { error } = await supabase.storage.from('profilePictures').upload(path, webpBuffer, {
+      contentType: 'image/webp',
+      upsert: true,
+      cacheControl: '3600',
+    });
+
+    if (error) {
+      logger.error({ error }, 'Failed to upload profile image to Supabase');
+      return null;
+    }
+
+    const { data } = supabase.storage.from('profilePictures').getPublicUrl(path);
+    return data.publicUrl;
+  } catch (error) {
+    logger.error({ error }, 'Error uploading profile image');
+    return null;
+  }
+}
 
 export default async function authRoutes(server: FastifyInstance) {
   // POST /auth/google - Login with Google ID token
@@ -50,14 +101,24 @@ export default async function authRoutes(server: FastifyInstance) {
         });
 
         const payload = ticket.getPayload();
-        if (!payload || !payload.email) {
+        if (!payload || !payload.email || !payload.sub) {
           reply.status(400).send({ error: 'Invalid Google token' });
           return {} as AuthLoginResponse;
         }
 
+        if (payload.email_verified !== true) {
+          reply.status(403).send({
+            error: 'Access Denied',
+            message: 'Only verified organization emails are allowed',
+          });
+          return {} as AuthLoginResponse;
+        }
+
+        const normalizedEmail = payload.email.trim().toLowerCase();
+
         // Check if email is from allowed domain (UMak)
-        const allowedDomain = process.env.ALLOWED_EMAIL_DOMAIN || 'umak.edu.ph';
-        if (!payload.email.endsWith(`@${allowedDomain}`)) {
+        const allowedDomain = (process.env.ALLOWED_EMAIL_DOMAIN || 'umak.edu.ph').trim().toLowerCase();
+        if (!normalizedEmail.endsWith(`@${allowedDomain}`)) {
           reply.status(403).send({
             error: 'Access Denied',
             message: 'Please use your organization email to sign in',
@@ -67,27 +128,48 @@ export default async function authRoutes(server: FastifyInstance) {
 
         const supabase = getSupabaseClient();
 
-        // Upsert user
-        const { data: user, error: upsertError } = await supabase
+        // Upsert user (profile image will be handled separately)
+        const { data: upsertedUser, error: upsertError } = await supabase
           .from('user_table')
           .upsert(
             {
-              user_id: payload.sub,
-              email: payload.email,
+              email: normalizedEmail,
               user_name: payload.name || null,
-              profile_picture_url: payload.picture || null,
             },
             {
-              onConflict: 'user_id',
+              onConflict: 'email',
             }
           )
           .select()
           .single();
+        let user = upsertedUser;
 
         if (upsertError || !user) {
           logger.error({ error: upsertError }, 'Failed to upsert user');
           reply.status(500).send({ error: 'Failed to create user session' });
           return {} as AuthLoginResponse;
+        }
+
+        if (!isAllowedUserType(user.user_type)) {
+          logger.error({ userId: user.user_id, userType: user.user_type }, 'Invalid user role in database');
+          reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
+          return {} as AuthLoginResponse;
+        }
+
+        if (payload.picture) {
+          const uploadedUrl = await uploadProfilePicture(supabase, user.user_id, payload.picture);
+          if (uploadedUrl) {
+            const { data: updatedUser, error: updateError } = await supabase
+              .from('user_table')
+              .update({ profile_picture_url: uploadedUrl })
+              .eq('user_id', user.user_id)
+              .select()
+              .single();
+
+            if (!updateError && updatedUser) {
+              user = updatedUser;
+            }
+          }
         }
 
         // Create JWT
@@ -129,7 +211,18 @@ export default async function authRoutes(server: FastifyInstance) {
           200: {
             type: 'object',
             properties: {
-              user: { type: 'object' },
+              user: {
+                type: 'object',
+                properties: {
+                  user_id: { type: 'string' },
+                  user_name: { type: 'string' },
+                  email: { type: 'string' },
+                  profile_picture_url: { type: ['string', 'null'] },
+                  user_type: { type: 'string' },
+                  notification_token: { type: ['string', 'null'] },
+                },
+                required: ['user_id', 'user_name', 'email', 'user_type'],
+              },
             },
           },
         },
@@ -152,6 +245,12 @@ export default async function authRoutes(server: FastifyInstance) {
       if (error || !user) {
         logger.error({ error, userId: request.user.user_id }, 'Failed to fetch user');
         reply.status(404).send({ error: 'User not found' });
+        return {} as AuthMeResponse;
+      }
+
+      if (!isAllowedUserType(user.user_type)) {
+        logger.warn({ userId: user.user_id, userType: user.user_type }, 'Blocked user with invalid role');
+        reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
         return {} as AuthMeResponse;
       }
 

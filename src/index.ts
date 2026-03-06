@@ -1,9 +1,10 @@
+import 'dotenv/config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { errorHandler } from './middleware/error-handler.js';
-import logger from './utils/logger.js';
+import logger, { loggerOptions } from './utils/logger.js';
 
 // Import routes
 import authRoutes from './routes/auth.js';
@@ -20,10 +21,14 @@ import adminRoutes from './routes/admin.js';
 import itemsRoutes from './routes/items.js';
 import pendingMatchesRoutes from './routes/pending-matches.js';
 import emailRoutes from './routes/email.js';
+import aiRoutes from './routes/ai.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || '';
+const isDevelopment = process.env.NODE_ENV !== 'production';
+const ALLOWED_ORIGINS =
+  process.env.ALLOWED_ORIGINS ||
+  (isDevelopment ? 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173' : '');
 const ALLOWED_ORIGIN_LIST = ALLOWED_ORIGINS.split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -52,7 +57,7 @@ function validateStartupConfig() {
 validateStartupConfig();
 
 const server = Fastify({
-  logger: logger,
+  logger: loggerOptions,
   trustProxy: true,
   requestIdHeader: 'x-request-id',
   requestIdLogLabel: 'reqId',
@@ -109,6 +114,7 @@ await server.register(adminRoutes, { prefix: '/admin' });
 await server.register(itemsRoutes, { prefix: '/items' });
 await server.register(pendingMatchesRoutes, { prefix: '/pending-matches' });
 await server.register(emailRoutes, { prefix: '/email' });
+await server.register(aiRoutes, { prefix: '/ai' });
 
 // Error handler
 server.setErrorHandler(errorHandler);

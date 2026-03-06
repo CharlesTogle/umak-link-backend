@@ -2,6 +2,7 @@ import admin from 'firebase-admin';
 import logger from '../utils/logger.js';
 import { getSupabaseClient } from './supabase.js';
 import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
+import { getPhilippineNowIso } from '../utils/time.js';
 
 let firebaseInitialized = false;
 
@@ -32,6 +33,42 @@ export interface NotificationPayload {
   type: string;
   data?: Record<string, unknown>;
   image_url?: string | null;
+  sent_by?: string | null;
+}
+
+type SupabaseErrorLike = {
+  code?: string;
+  message?: string;
+};
+
+function isMissingColumnError(error: unknown, column: string): boolean {
+  const typed = error as SupabaseErrorLike | null;
+  if (!typed) return false;
+  return typed.code === 'PGRST204' && typeof typed.message === 'string' && typed.message.includes(`'${column}'`);
+}
+
+async function createNotificationImageId(
+  imageUrl: string | null | undefined
+): Promise<number | null> {
+  if (!imageUrl) return null;
+
+  const supabase = getSupabaseClient();
+  const createdAt = getPhilippineNowIso();
+  const { data, error } = await supabase
+    .from('notification_image_table')
+    .insert({
+      image_url: imageUrl,
+      created_at: createdAt,
+    })
+    .select('image_id')
+    .single();
+
+  if (error) {
+    logger.warn({ error }, 'Failed to persist notification image');
+    return null;
+  }
+
+  return data?.image_id ?? null;
 }
 
 export async function sendPushNotification(
@@ -88,26 +125,65 @@ export async function sendPushNotification(
   }
 }
 
-export async function createNotification(payload: NotificationPayload): Promise<number | null> {
+export async function createNotification(payload: NotificationPayload): Promise<string | number | null> {
   const supabase = getSupabaseClient();
 
   try {
-    const { data, error } = await supabase
+    const imageId = await createNotificationImageId(payload.image_url);
+    const createdAt = getPhilippineNowIso();
+
+    const canonicalInsert = await supabase
       .from('notification_table')
       .insert({
-        user_id: payload.user_id,
+        notification_id: crypto.randomUUID(),
+        created_at: createdAt,
         title: payload.title,
-        body: payload.body,
-        description: payload.description,
+        description: payload.description ?? payload.body,
+        sent_to: payload.user_id,
+        sent_by: payload.sent_by ?? null,
         type: payload.type,
+        data: payload.data || {},
         is_read: false,
+        ...(imageId ? { image_id: imageId } : {}),
       })
       .select('notification_id')
       .single();
 
-    if (error) {
-      logger.error({ error }, 'Failed to create notification in database');
-      return null;
+    let notificationId: string | number | null = canonicalInsert.data?.notification_id ?? null;
+
+    if (canonicalInsert.error) {
+      const shouldFallback =
+        isMissingColumnError(canonicalInsert.error, 'sent_to') ||
+        isMissingColumnError(canonicalInsert.error, 'description');
+
+      if (!shouldFallback) {
+        logger.error({ error: canonicalInsert.error }, 'Failed to create notification in database');
+        return null;
+      }
+
+      // Backward-compatible fallback for older schemas using user_id/body.
+      const legacyInsert = await supabase
+        .from('notification_table')
+        .insert({
+          created_at: createdAt,
+          user_id: payload.user_id,
+          title: payload.title,
+          body: payload.body,
+          description: payload.description,
+          type: payload.type,
+          data: payload.data || {},
+          is_read: false,
+          ...(payload.image_url ? { image_url: payload.image_url } : {}),
+        })
+        .select('notification_id')
+        .single();
+
+      if (legacyInsert.error) {
+        logger.error({ error: legacyInsert.error }, 'Failed to create notification in fallback schema');
+        return null;
+      }
+
+      notificationId = legacyInsert.data?.notification_id ?? null;
     }
 
     // Get user's notification token and send push
@@ -121,7 +197,7 @@ export async function createNotification(payload: NotificationPayload): Promise<
       await sendPushNotification(userData.notification_token, payload);
     }
 
-    return data.notification_id;
+    return notificationId;
   } catch (error) {
     logger.error({ error }, 'Error in createNotification');
     return null;
@@ -137,10 +213,12 @@ export async function sendGlobalAnnouncement(
   const supabase = getSupabaseClient();
 
   try {
+    const createdAt = getPhilippineNowIso();
     // Create announcement record
     const { data: announcement, error: announcementError } = await supabase
       .from('global_announcements_table')
       .insert({
+        created_at: createdAt,
         message,
         description,
         image_url: imageUrl,

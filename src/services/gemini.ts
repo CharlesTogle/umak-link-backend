@@ -2,6 +2,24 @@ import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import logger from '../utils/logger.js';
 import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
+const CREATE_POST_CATEGORIES = [
+  'Electronics',
+  'Accessories',
+  'Documents',
+  'Books & Notebooks',
+  'Bags',
+  'Wallets & Cards',
+  'Keys',
+  'Clothing',
+  'Eyewear',
+  'School Supplies',
+  'Sports Equipment',
+  'Water Bottles',
+  'Umbrellas',
+  'Medical Items',
+  'Other',
+] as const;
+
 interface RateLimiter {
   tokens: number;
   lastRefill: number;
@@ -86,6 +104,87 @@ class GeminiService {
     }
   }
 
+  async generateCreatePostAutofill(
+    input: CreatePostAutofillInput
+  ): Promise<CreatePostAutofillOutput> {
+    if (!this.model) {
+      throw new Error('Gemini service not configured');
+    }
+
+    const canProceed = await this.acquireToken();
+    if (!canProceed) {
+      throw new RateLimitError('Rate limit exceeded');
+    }
+
+    const prompt = this.buildCreatePostAutofillPrompt(input);
+    const result = await withTimeout(
+      this.model.generateContent([
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType: input.mimeType,
+            data: input.imageBase64,
+          },
+        },
+      ]),
+      DEFAULT_TIMEOUT_MS,
+      'Gemini create-post autofill'
+    );
+
+    const responseText = result.response.text();
+    return this.parseCreatePostAutofillResponse(responseText);
+  }
+
+  async generateReverseImageSearchQuery(input: ReverseImageSearchInput): Promise<string> {
+    if (!this.model) {
+      throw new Error('Gemini service not configured');
+    }
+
+    const canProceed = await this.acquireToken();
+    if (!canProceed) {
+      throw new RateLimitError('Rate limit exceeded');
+    }
+
+    const prompt = `Analyze this image of a lost or found item. Identify the main object, its color, brand, model, material, and fixed physical features visible in the image.
+
+Generate a search query string using only objective attributes.
+- Use AND to pair adjectives and nouns.
+- Use OR for alternatives in the same attribute category.
+- Output 10 to 20 keyword phrases.
+- Output only the final query string without explanations or markdown.`;
+
+    const result = await withTimeout(
+      this.model.generateContent([
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType: input.mimeType,
+            data: input.imageBase64,
+          },
+        },
+      ]),
+      DEFAULT_TIMEOUT_MS,
+      'Gemini reverse-image search'
+    );
+
+    const rawQuery = result.response
+      .text()
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .replace(/['"]/g, '')
+      .trim();
+
+    const baseQuery = input.searchValue?.trim() || '';
+    if (baseQuery && rawQuery) {
+      return `${baseQuery} OR ${rawQuery}`;
+    }
+    if (rawQuery) {
+      return rawQuery;
+    }
+    return baseQuery;
+  }
+
   private buildPrompt(item: ItemData): string {
     return `Analyze this lost/found item and generate metadata for search matching.
 
@@ -108,6 +207,37 @@ Respond in JSON format:
   "brand": "brand or null",
   "condition": "condition",
   "value_range": "range"
+}`;
+  }
+
+  private buildCreatePostAutofillPrompt(input: CreatePostAutofillInput): string {
+    const titleSeed = input.currentTitle?.trim() || '';
+    const descriptionSeed = input.currentDescription?.trim() || '';
+    const categorySeed = input.currentCategory?.trim() || '';
+    const categories = CREATE_POST_CATEGORIES.join(', ');
+
+    return `You are helping a university lost-and-found staff create a post from an uploaded item photo.
+
+Rules:
+- Infer only what is reasonably visible from the image.
+- Return valid JSON only. No markdown. No explanation.
+- Output keys: itemName, itemDescription, itemCategory
+- itemName: max 32 characters, concise, title-style
+- itemDescription: max 150 characters, practical and neutral
+- itemCategory: choose exactly one from this list:
+${categories}
+- If uncertain about category, use "Other".
+
+Current staff inputs (may be empty and can be improved):
+- itemName: "${titleSeed}"
+- itemDescription: "${descriptionSeed}"
+- itemCategory: "${categorySeed}"
+
+Respond with:
+{
+  "itemName": "string",
+  "itemDescription": "string",
+  "itemCategory": "string"
 }`;
   }
 
@@ -137,6 +267,46 @@ Respond in JSON format:
         value_range: 'unknown',
       };
     }
+  }
+
+  private parseCreatePostAutofillResponse(text: string): CreatePostAutofillOutput {
+    const raw = text
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Failed to parse Gemini autofill response');
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    } catch {
+      throw new Error('Invalid Gemini autofill JSON');
+    }
+
+    const itemName =
+      typeof parsed.itemName === 'string' ? parsed.itemName.trim().slice(0, 32) : '';
+    const itemDescription =
+      typeof parsed.itemDescription === 'string'
+        ? parsed.itemDescription.trim().slice(0, 150)
+        : '';
+    const candidateCategory =
+      typeof parsed.itemCategory === 'string' ? parsed.itemCategory.trim() : 'Other';
+
+    const allowedCategories = new Set<string>(CREATE_POST_CATEGORIES);
+    const itemCategory = allowedCategories.has(candidateCategory)
+      ? candidateCategory
+      : 'Other';
+
+    return {
+      itemName: itemName || undefined,
+      itemDescription: itemDescription || undefined,
+      itemCategory,
+    };
   }
 
   private async queueForRetry(item: ItemData): Promise<void> {
@@ -195,6 +365,26 @@ export interface Metadata {
   brand: string | null;
   condition: string;
   value_range: string;
+}
+
+export interface CreatePostAutofillInput {
+  imageBase64: string;
+  mimeType: string;
+  currentTitle?: string;
+  currentDescription?: string;
+  currentCategory?: string;
+}
+
+export interface CreatePostAutofillOutput {
+  itemName?: string;
+  itemDescription?: string;
+  itemCategory?: string;
+}
+
+export interface ReverseImageSearchInput {
+  imageBase64: string;
+  mimeType: string;
+  searchValue?: string;
 }
 
 export class RateLimitError extends Error {

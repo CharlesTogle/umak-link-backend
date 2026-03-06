@@ -15,7 +15,7 @@ export interface SignedUploadUrl {
 export async function generateSignedUploadUrl(
   bucket: 'items' | 'profilePictures',
   fileName: string,
-  _contentType: string,
+  contentType: string,
   _expiresIn: number = 3600
 ): Promise<SignedUploadUrl> {
   const supabase = getSupabaseClient();
@@ -23,6 +23,12 @@ export async function generateSignedUploadUrl(
   const ext = path.extname(fileName).toLowerCase();
   const safeExt =
     ext && ext.length <= 10 && /^[a-z0-9.]+$/.test(ext) ? ext : '';
+
+  if (contentType !== 'image/webp' || safeExt !== '.webp') {
+    logger.warn({ bucket, fileName, contentType }, 'Rejected non-webp upload');
+    throw new Error('Only WebP uploads are allowed');
+  }
+
   const objectPath = `${Date.now()}-${crypto.randomUUID()}${safeExt}`;
 
   const { data, error } = await supabase.storage
@@ -60,6 +66,13 @@ export async function confirmUpload(
   if (error || !data || data.length === 0) {
     logger.error({ bucket, objectPath }, 'Upload confirmation failed - file not found');
     throw new Error('File not found');
+  }
+
+  const match = data.find((item) => item.name === objectPath);
+  const mimeType = match?.metadata?.mimetype as string | undefined;
+  if (!objectPath.toLowerCase().endsWith('.webp') || (mimeType && mimeType !== 'image/webp')) {
+    logger.warn({ bucket, objectPath, mimeType }, 'Rejected non-webp upload on confirm');
+    throw new Error('Only WebP uploads are allowed');
   }
 
   const publicUrl = supabase.storage.from(bucketName).getPublicUrl(objectPath).data.publicUrl;

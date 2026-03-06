@@ -5,6 +5,34 @@ import { PostListResponse, PostRecord } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
 import { parsePagination } from '../../utils/pagination.js';
 
+async function attachPosterProfileUrls<T extends { poster_id?: string | null }>(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  posts: T[]
+): Promise<Array<T & { poster_profile_picture_url?: string | null }>> {
+  const posterIds = Array.from(
+    new Set(posts.map((post) => post.poster_id).filter((id): id is string => Boolean(id)))
+  );
+
+  if (posterIds.length === 0) return posts;
+
+  const { data, error } = await supabase
+    .from('user_table')
+    .select('user_id, profile_picture_url')
+    .in('user_id', posterIds);
+
+  if (error || !data) {
+    logger.error({ error }, 'Failed to fetch poster profile pictures');
+    return posts;
+  }
+
+  const profileMap = new Map(data.map((user) => [user.user_id, user.profile_picture_url]));
+
+  return posts.map((post) => ({
+    ...post,
+    poster_profile_picture_url: post.poster_id ? profileMap.get(post.poster_id) ?? null : null,
+  }));
+}
+
 export default async function postsReadRoutes(server: FastifyInstance) {
   // GET /posts - Comprehensive post listing with filtering
   server.get<{
@@ -135,7 +163,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       }
     }
 
-    return { posts: posts || [], count: totalCount || posts?.length };
+    const enrichedPosts = await attachPosterProfileUrls(supabase, posts || []);
+    return { posts: enrichedPosts || [], count: totalCount || posts?.length };
   });
 
   // GET /posts/public - List all public posts (kept for backward compatibility)
@@ -152,7 +181,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       throw new Error('Failed to fetch posts');
     }
 
-    return { posts: posts || [], count: posts?.length };
+    const enrichedPosts = await attachPosterProfileUrls(supabase, posts || []);
+    return { posts: enrichedPosts || [], count: posts?.length };
   });
 
   // GET /posts/count - Get total posts count with filters
@@ -210,7 +240,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       throw new Error('Post not found');
     }
 
-    return post;
+    const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
+    return enriched ?? post;
   });
 
   // GET /posts/by-item-details/:itemId - Get post record by item ID (from details view)
@@ -229,7 +260,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       throw new Error('Post not found');
     }
 
-    return post;
+    const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
+    return enriched ?? post;
   });
 
   // GET /posts/:id - Get single post detail
@@ -248,7 +280,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       throw new Error('Post not found');
     }
 
-    return post;
+    const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
+    return enriched ?? post;
   });
 
   // GET /posts/:id/full - Get full post details (staff only)

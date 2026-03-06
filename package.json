@@ -24,6 +24,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "dotenv": "^16.4.7",
     "@google/generative-ai": "^0.21.0",
     "@supabase/supabase-js": "^2.48.0",
     "fastify": "^5.2.0",
@@ -32,6 +33,7 @@
     "@fastify/rate-limit": "^10.0.0",
     "google-auth-library": "^9.15.0",
     "jsonwebtoken": "^9.0.2",
+    "sharp": "^0.33.5",
     "firebase-admin": "^13.0.0",
     "resend": "^4.0.0",
     "pino": "^9.6.0",

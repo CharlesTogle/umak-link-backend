@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../services/supabase.js';
 import { requireStaff } from '../middleware/auth.js';
 import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
+import { getPhilippineNowIso } from '../utils/time.js';
 
 interface PendingMatchCreateRequest {
   post_id: number;
@@ -36,10 +37,12 @@ export default async function pendingMatchesRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const body = request.body;
+      const createdAt = getPhilippineNowIso();
 
       const { data, error } = await supabase
         .from('pending_match')
         .insert({
+          created_at: createdAt,
           post_id: body.post_id,
           poster_id: body.poster_id,
           status: body.status,

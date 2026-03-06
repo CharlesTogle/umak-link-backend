@@ -46,6 +46,7 @@ export interface PostRecord {
   item_id: string;
   poster_name: string;
   poster_id: string;
+  poster_profile_picture_url?: string | null;
   item_name: string;
   item_description: string | null;
   item_type: ItemType;

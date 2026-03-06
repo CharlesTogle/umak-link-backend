@@ -2,7 +2,7 @@ import pino from 'pino';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
 
-export const logger = pino({
+export const loggerOptions = {
   level: process.env.LOG_LEVEL || (isDevelopment ? 'debug' : 'info'),
   transport: isDevelopment
     ? {
@@ -18,6 +18,8 @@ export const logger = pino({
   formatters: {
     level: (label) => ({ severity: label.toUpperCase() }),
   },
-});
+} as const;
+
+export const logger = pino(loggerOptions);
 
 export default logger;

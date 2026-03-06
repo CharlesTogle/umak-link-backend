@@ -5,6 +5,24 @@ import { requireAuth, requireStaff } from '../middleware/auth.js';
 import { SendNotificationRequest, NotificationRecord } from '../types/notifications.js';
 import logger from '../utils/logger.js';
 
+type SupabaseErrorLike = {
+  code?: string;
+  message?: string;
+  details?: string | null;
+  hint?: string | null;
+};
+
+function isMissingColumnError(error: unknown, column: string): boolean {
+  const typed = error as SupabaseErrorLike | null;
+  if (!typed) return false;
+  return typed.code === 'PGRST204' && typeof typed.message === 'string' && typed.message.includes(`'${column}'`);
+}
+
+function normalizeNotificationId(value: string): string | number {
+  if (/^\d+$/.test(value)) return Number(value);
+  return value;
+}
+
 export default async function notificationsRoutes(server: FastifyInstance) {
   // POST /notifications/send - Create and send notification
   server.post<{ Body: SendNotificationRequest }>(
@@ -29,7 +47,10 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const notificationId = await createNotification(request.body);
+      const notificationId = await createNotification({
+        ...request.body,
+        sent_by: request.user?.user_id ?? null,
+      });
 
       if (!notificationId) {
         throw new Error('Failed to create notification');
@@ -50,18 +71,41 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const userId = request.user?.user_id;
 
-      const { data, error } = await supabase
+      let response = await supabase
         .from('notification_view')
         .select('*')
-        .eq('user_id', userId)
+        .eq('sent_to', userId)
         .order('created_at', { ascending: false });
 
-      if (error) {
-        logger.error({ error, userId }, 'Failed to fetch notifications');
+      if (response.error && isMissingColumnError(response.error, 'sent_to')) {
+        response = await supabase
+          .from('notification_view')
+          .select('*')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false });
+      }
+
+      if (response.error) {
+        logger.error({ error: response.error, userId }, 'Failed to fetch notifications');
         throw new Error('Failed to fetch notifications');
       }
 
-      return { notifications: data || [] };
+      const notifications: NotificationRecord[] = (response.data || []).map((row: Record<string, unknown>) => ({
+        notification_id: row.notification_id as string | number,
+        user_id: (row.user_id as string | null) ?? (row.sent_to as string | null) ?? userId ?? '',
+        title: String(row.title ?? ''),
+        body: String(row.body ?? row.description ?? ''),
+        description: (row.description as string | null) ?? null,
+        sent_to: (row.sent_to as string | null) ?? (row.user_id as string | null) ?? null,
+        sent_by: (row.sent_by as string | null) ?? null,
+        type: String(row.type ?? 'info'),
+        data: (row.data as Record<string, unknown> | null) ?? null,
+        is_read: Boolean(row.is_read),
+        created_at: String(row.created_at ?? ''),
+        image_url: (row.image_url as string | null) ?? null,
+      }));
+
+      return { notifications };
     }
   );
 
@@ -75,18 +119,26 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const userId = request.user?.user_id;
 
-      const { count, error } = await supabase
+      let countQuery = await supabase
         .from('notification_table')
         .select('*', { count: 'exact', head: true })
-        .eq('user_id', userId)
+        .eq('sent_to', userId)
         .eq('is_read', false);
 
-      if (error) {
-        logger.error({ error, userId }, 'Failed to count notifications');
-        throw new Error('Failed to count notifications');
+      if (countQuery.error && isMissingColumnError(countQuery.error, 'sent_to')) {
+        countQuery = await supabase
+          .from('notification_table')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('is_read', false);
       }
 
-      return { unread_count: count || 0 };
+      if (countQuery.error) {
+        logger.error({ userId, error: countQuery.error }, 'Failed to count notifications');
+        return { unread_count: 0 };
+      }
+
+      return { unread_count: countQuery.count || 0 };
     }
   );
 
@@ -98,7 +150,7 @@ export default async function notificationsRoutes(server: FastifyInstance) {
     },
     async (request) => {
       const supabase = getSupabaseClient();
-      const notificationId = parseInt(request.params.id, 10);
+      const notificationId = normalizeNotificationId(request.params.id);
 
       const { error } = await supabase
         .from('notification_table')
@@ -122,7 +174,7 @@ export default async function notificationsRoutes(server: FastifyInstance) {
     },
     async (request) => {
       const supabase = getSupabaseClient();
-      const notificationId = parseInt(request.params.id, 10);
+      const notificationId = normalizeNotificationId(request.params.id);
 
       const { error } = await supabase
         .from('notification_table')

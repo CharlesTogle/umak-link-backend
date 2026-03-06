@@ -37,13 +37,10 @@ export default async function postsStatusRoutes(server: FastifyInstance) {
       const postId = parseInt(request.params.id, 10);
       const { status, rejection_reason } = request.body;
 
-      const updateData: { post_status: string; rejection_reason?: string } = {
-        post_status: status,
+      const updateData: { status: string; rejection_reason: string | null } = {
+        status,
+        rejection_reason: status === 'rejected' ? rejection_reason ?? null : null,
       };
-
-      if (rejection_reason) {
-        updateData.rejection_reason = rejection_reason;
-      }
 
       const { error } = await supabase.from('post_table').update(updateData).eq('post_id', postId);
 

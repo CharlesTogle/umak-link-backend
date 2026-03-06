@@ -9,11 +9,15 @@ export interface SendNotificationRequest {
 }
 
 export interface NotificationRecord {
-  notification_id: number;
+  notification_id: string | number;
   user_id: string;
   title: string;
   body: string;
+  description?: string | null;
+  sent_to?: string | null;
+  sent_by?: string | null;
   type: string;
+  data?: Record<string, unknown> | null;
   is_read: boolean;
   created_at: string;
   image_url?: string | null;

@@ -139,6 +139,9 @@ docker run -p 8080:8080 --env-file .env umak-link-backend
 - `POST /jobs/metadata-batch` - Generate AI metadata (system)
 - `POST /jobs/pending-match` - Match lost/found items (system)
 
+### AI
+- `POST /ai/create-post-autofill` - Generate item title/description/category from image (auth required)
+
 ### Health
 - `GET /health` - Health check
 

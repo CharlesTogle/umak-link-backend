@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../services/supabase.js';
+import { getGeminiService, RateLimitError } from '../services/gemini.js';
 import { requireAuth, requireStaff } from '../middleware/auth.js';
 import { SearchItemsRequest, SearchItemsStaffRequest } from '../types/search.js';
 import logger from '../utils/logger.js';
@@ -15,7 +16,110 @@ interface MatchResult {
   total_matches?: number;
 }
 
+interface ReverseImageQueryBody {
+  image_data_url: string;
+  search_value?: string;
+}
+
+function isAbortLikeError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+
+  const asRecord = error as Record<string, unknown>;
+  const message = typeof asRecord.message === 'string' ? asRecord.message : '';
+  const details = typeof asRecord.details === 'string' ? asRecord.details : '';
+  const hint = typeof asRecord.hint === 'string' ? asRecord.hint : '';
+  const code = typeof asRecord.code === 'string' ? asRecord.code : '';
+
+  const combined = `${message} ${details} ${hint} ${code}`.toLowerCase();
+  return combined.includes('abort') || combined.includes('timeout') || combined.includes('timed out');
+}
+
+function throwSearchError(error: unknown, fallbackMessage: string): never {
+  if (isAbortLikeError(error)) {
+    const timeoutError = new Error(
+      'Search request timed out. Please try again or narrow your filters.'
+    ) as Error & { statusCode?: number };
+    timeoutError.statusCode = 504;
+    throw timeoutError;
+  }
+
+  const internalError = new Error(fallbackMessage) as Error & { statusCode?: number };
+  internalError.statusCode = 500;
+  throw internalError;
+}
+
+function parseImageDataUrl(dataUrl: string): { mimeType: string; base64: string } {
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) {
+    throw new Error('Invalid image_data_url');
+  }
+
+  return {
+    mimeType: match[1],
+    base64: match[2],
+  };
+}
+
 export default async function searchRoutes(server: FastifyInstance) {
+  // POST /search/image-query - Generate search query from an uploaded image
+  server.post<{ Body: ReverseImageQueryBody }>(
+    '/image-query',
+    {
+      preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['image_data_url'],
+          properties: {
+            image_data_url: { type: 'string', minLength: 1 },
+            search_value: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const { mimeType, base64 } = parseImageDataUrl(request.body.image_data_url);
+        const gemini = getGeminiService();
+
+        const searchQuery = await gemini.generateReverseImageSearchQuery({
+          imageBase64: base64,
+          mimeType,
+          searchValue: request.body.search_value,
+        });
+
+        return {
+          success: true,
+          search_query: searchQuery,
+        };
+      } catch (error) {
+        if (error instanceof RateLimitError) {
+          return reply.status(429).send({
+            success: false,
+            error: 'rate_limit_exceeded',
+            message: 'Image search is limited right now. Try again later.',
+          });
+        }
+
+        if (error instanceof Error && error.message === 'Gemini service not configured') {
+          return reply.status(503).send({
+            success: false,
+            error: 'ai_unavailable',
+            message: 'Image search is unavailable right now.',
+          });
+        }
+
+        logger.error({ error }, 'Failed to generate reverse image search query');
+        return reply.status(500).send({
+          success: false,
+          error: 'image_query_failed',
+          message: 'Failed to analyze image for search.',
+        });
+      }
+    }
+  );
+
   // POST /search/items - User search
   server.post<{ Body: SearchItemsRequest }>(
     '/items',
@@ -47,23 +151,49 @@ export default async function searchRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const body = request.body;
+      const requestedLimit = body.limit || 50;
 
-      const { data, error } = await supabase.rpc('search_items_fts', {
-        search_query: body.query,
-        search_limit: body.limit || 50,
-        last_seen_date_param: body.last_seen_date,
-        category_param: body.category,
-        location_last_seen_param: body.location_last_seen,
-        claim_from_param: body.claim_from,
-        claim_to_param: body.claim_to,
-        item_status_param: body.item_status,
-        sort_param: body.sort || 'submission_date',
-        sort_direction_param: body.sort_direction || 'desc',
+      let { data, error } = await supabase.rpc('search_items_fts', {
+        search_term: body.query,
+        limit_count: requestedLimit,
+        p_date: body.last_seen_date,
+        p_category: body.category,
+        p_location_last_seen: body.location_last_seen,
+        p_claim_from: body.claim_from,
+        p_claim_to: body.claim_to,
+        p_item_status: body.item_status,
+        p_limit: requestedLimit,
+        p_sort: body.sort || 'submission_date',
+        p_sort_direction: body.sort_direction || 'desc',
       });
+
+      if (error && isAbortLikeError(error) && requestedLimit > 20) {
+        logger.warn(
+          { requestedLimit, retryLimit: 20 },
+          'Search timed out, retrying with smaller limit'
+        );
+
+        const retry = await supabase.rpc('search_items_fts', {
+          search_term: body.query,
+          limit_count: 20,
+          p_date: body.last_seen_date,
+          p_category: body.category,
+          p_location_last_seen: body.location_last_seen,
+          p_claim_from: body.claim_from,
+          p_claim_to: body.claim_to,
+          p_item_status: body.item_status,
+          p_limit: 20,
+          p_sort: body.sort || 'submission_date',
+          p_sort_direction: body.sort_direction || 'desc',
+        });
+
+        data = retry.data;
+        error = retry.error;
+      }
 
       if (error) {
         logger.error({ error }, 'Search failed');
-        throw new Error(error.message || 'Search failed');
+        throwSearchError(error, error.message || 'Search failed');
       }
 
       return { results: data || [] };
@@ -101,23 +231,49 @@ export default async function searchRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const body = request.body;
+      const requestedLimit = body.limit || 50;
 
-      const { data, error } = await supabase.rpc('search_items_fts_staff', {
-        search_query: body.query,
-        search_limit: body.limit || 50,
-        last_seen_date_param: body.last_seen_date,
-        category_param: body.category,
-        location_last_seen_param: body.location_last_seen,
-        claim_from_param: body.claim_from,
-        claim_to_param: body.claim_to,
-        item_status_param: body.item_status,
-        sort_param: body.sort || 'submission_date',
-        sort_direction_param: body.sort_direction || 'desc',
+      let { data, error } = await supabase.rpc('search_items_fts_staff', {
+        search_term: body.query,
+        limit_count: requestedLimit,
+        p_date: body.last_seen_date,
+        p_category: body.category,
+        p_location_last_seen: body.location_last_seen,
+        p_claim_from: body.claim_from,
+        p_claim_to: body.claim_to,
+        p_item_status: body.item_status,
+        p_limit: requestedLimit,
+        p_sort: body.sort || 'submission_date',
+        p_sort_direction: body.sort_direction || 'desc',
       });
+
+      if (error && isAbortLikeError(error) && requestedLimit > 20) {
+        logger.warn(
+          { requestedLimit, retryLimit: 20 },
+          'Staff search timed out, retrying with smaller limit'
+        );
+
+        const retry = await supabase.rpc('search_items_fts_staff', {
+          search_term: body.query,
+          limit_count: 20,
+          p_date: body.last_seen_date,
+          p_category: body.category,
+          p_location_last_seen: body.location_last_seen,
+          p_claim_from: body.claim_from,
+          p_claim_to: body.claim_to,
+          p_item_status: body.item_status,
+          p_limit: 20,
+          p_sort: body.sort || 'submission_date',
+          p_sort_direction: body.sort_direction || 'desc',
+        });
+
+        data = retry.data;
+        error = retry.error;
+      }
 
       if (error) {
         logger.error({ error }, 'Staff search failed');
-        throw new Error(error.message || 'Search failed');
+        throwSearchError(error, error.message || 'Search failed');
       }
 
       return { results: data || [] };
@@ -166,16 +322,17 @@ export default async function searchRoutes(server: FastifyInstance) {
       }
 
       const { data: matches, error: searchError } = await supabase.rpc('search_items_fts_staff', {
-        search_query: searchQuery,
-        search_limit: 20,
-        last_seen_date_param: null,
-        category_param: itemData.category ? [itemData.category] : null,
-        location_last_seen_param: null,
-        claim_from_param: null,
-        claim_to_param: null,
-        item_status_param: ['unclaimed'],
-        sort_param: 'accepted_on_date',
-        sort_direction_param: 'desc',
+        search_term: searchQuery,
+        limit_count: 20,
+        p_date: null,
+        p_category: itemData.category ? [itemData.category] : null,
+        p_location_last_seen: null,
+        p_claim_from: null,
+        p_claim_to: null,
+        p_item_status: ['unclaimed'],
+        p_limit: 20,
+        p_sort: 'accepted_on_date',
+        p_sort_direction: 'desc',
       });
 
       if (searchError) {

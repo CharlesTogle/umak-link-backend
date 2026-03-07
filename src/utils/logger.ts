@@ -16,7 +16,7 @@ export const loggerOptions = {
     : undefined,
   // Cloud Run expects structured JSON logs in production
   formatters: {
-    level: (label) => ({ severity: label.toUpperCase() }),
+    level: (label: string) => ({ severity: label.toUpperCase() }),
   },
 } as const;
 

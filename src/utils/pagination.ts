@@ -18,8 +18,8 @@ export function parsePagination(
   const parsedLimit = typeof limit === 'string' ? parseInt(limit, 10) : limit;
   const parsedOffset = typeof offset === 'string' ? parseInt(offset, 10) : offset;
 
-  const safeLimit = Number.isFinite(parsedLimit) ? parsedLimit : defaultLimit;
-  const safeOffset = Number.isFinite(parsedOffset) ? parsedOffset : defaultOffset;
+  const safeLimit: number = Number.isFinite(parsedLimit) ? parsedLimit! : defaultLimit;
+  const safeOffset: number = Number.isFinite(parsedOffset) ? parsedOffset! : defaultOffset;
 
   return {
     limit: Math.min(Math.max(safeLimit, 1), maxLimit),

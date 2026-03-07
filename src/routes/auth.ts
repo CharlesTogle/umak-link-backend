@@ -323,7 +323,7 @@ export default async function authRoutes(server: FastifyInstance) {
         },
       },
     },
-    async (request: FastifyRequest, reply): Promise<UpdateProfileResponse> => {
+    async (request: FastifyRequest<{ Body: UpdateProfileRequest }>, reply): Promise<UpdateProfileResponse> => {
       if (!request.user) {
         reply.status(401).send({ error: 'Unauthorized' });
         return {} as UpdateProfileResponse;

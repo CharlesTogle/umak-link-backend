@@ -22,6 +22,16 @@ export interface AuthMeResponse {
   user: UserProfile;
 }
 
+export interface UpdateProfileRequest {
+  notification_token?: string | null;
+  user_name?: string | null;
+  profile_picture_url?: string | null;
+}
+
+export interface UpdateProfileResponse {
+  user: UserProfile;
+}
+
 export interface JwtPayload {
   user_id: string;
   email: string | null;

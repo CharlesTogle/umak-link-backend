@@ -4,8 +4,9 @@ import jwt from 'jsonwebtoken';
 import sharp from 'sharp';
 import { getSupabaseClient } from '../services/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
-import { AuthLoginRequest, AuthLoginResponse, AuthMeResponse, UserProfile, UserType } from '../types/auth.js';
+import { AuthLoginRequest, AuthLoginResponse, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
+import { getPhilippineNowIso } from '../utils/time.js';
 
 const JWT_SECRET: string = (() => {
   const secret = process.env.JWT_SECRET;
@@ -22,6 +23,22 @@ const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null
 
 function isAllowedUserType(value: unknown): value is UserType {
   return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
+}
+
+/**
+ * Normalize name to Title Case (first letter of each word capitalized)
+ * "CHARLES NATHANIEL TOGLE" -> "Charles Nathaniel Togle"
+ * "john doe" -> "John Doe"
+ */
+function normalizeNameToTitleCase(name: string | null | undefined): string | null {
+  if (!name) return null;
+
+  return name
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
 }
 
 async function uploadProfilePicture(
@@ -127,6 +144,8 @@ export default async function authRoutes(server: FastifyInstance) {
         }
 
         const supabase = getSupabaseClient();
+        const loginTimestamp = getPhilippineNowIso();
+        const normalizedName = normalizeNameToTitleCase(payload.name);
 
         // Upsert user (profile image will be handled separately)
         const { data: upsertedUser, error: upsertError } = await supabase
@@ -134,7 +153,8 @@ export default async function authRoutes(server: FastifyInstance) {
           .upsert(
             {
               email: normalizedEmail,
-              user_name: payload.name || null,
+              user_name: normalizedName,
+              last_login: loginTimestamp,
             },
             {
               onConflict: 'email',
@@ -262,6 +282,90 @@ export default async function authRoutes(server: FastifyInstance) {
           profile_picture_url: user.profile_picture_url,
           user_type: user.user_type,
           notification_token: user.notification_token,
+        } as UserProfile,
+      };
+    }
+  );
+
+  // PATCH /auth/profile - Update current user profile
+  server.patch<{ Body: UpdateProfileRequest }>(
+    '/profile',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        body: {
+          type: 'object',
+          properties: {
+            notification_token: { type: ['string', 'null'] },
+            user_name: { type: ['string', 'null'] },
+            profile_picture_url: { type: ['string', 'null'] },
+          },
+          additionalProperties: false,
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              user: {
+                type: 'object',
+                properties: {
+                  user_id: { type: 'string' },
+                  user_name: { type: ['string', 'null'] },
+                  email: { type: ['string', 'null'] },
+                  profile_picture_url: { type: ['string', 'null'] },
+                  user_type: { type: 'string' },
+                  notification_token: { type: ['string', 'null'] },
+                },
+                required: ['user_id', 'email', 'user_type'],
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply): Promise<UpdateProfileResponse> => {
+      if (!request.user) {
+        reply.status(401).send({ error: 'Unauthorized' });
+        return {} as UpdateProfileResponse;
+      }
+
+      const updates = request.body;
+      const userId = request.user.user_id;
+
+      // Validate at least one field is being updated
+      if (Object.keys(updates).length === 0) {
+        reply.status(400).send({ error: 'No update fields provided' });
+        return {} as UpdateProfileResponse;
+      }
+
+      const supabase = getSupabaseClient();
+
+      const { data: updatedUser, error } = await supabase
+        .from('user_table')
+        .update(updates)
+        .eq('user_id', userId)
+        .select()
+        .single();
+
+      if (error || !updatedUser) {
+        logger.error({ error, userId }, 'Failed to update user profile');
+        reply.status(500).send({ error: 'Failed to update profile' });
+        return {} as UpdateProfileResponse;
+      }
+
+      // Log notification token registration
+      if (updates.notification_token) {
+        logger.info({ userId }, 'Notification token registered');
+      }
+
+      return {
+        user: {
+          user_id: updatedUser.user_id,
+          user_name: updatedUser.user_name,
+          email: updatedUser.email,
+          profile_picture_url: updatedUser.profile_picture_url,
+          user_type: updatedUser.user_type,
+          notification_token: updatedUser.notification_token,
         } as UserProfile,
       };
     }

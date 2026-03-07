@@ -30,7 +30,7 @@ export default async function adminRoutes(server: FastifyInstance) {
 
       let query = supabase
         .from('user_table')
-        .select('user_id, user_name, email, profile_picture_url, user_type');
+        .select('user_id, user_name, email, profile_picture_url, user_type, created_at, last_login');
 
       // Filter by user types if provided (comma-separated)
       if (user_type) {
@@ -105,22 +105,35 @@ export default async function adminRoutes(server: FastifyInstance) {
   );
 
   // GET /admin/dashboard-stats - Dashboard statistics
-  server.get(
+  server.get<{
+    Querystring: { date_range?: string };
+  }>(
     '/dashboard-stats',
     {
       preHandler: [requireAdmin],
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {
+            date_range: { type: 'string', enum: ['today', 'week', 'month', 'year', 'all'] },
+          },
+        },
+      },
     },
-    async (): Promise<DashboardStats> => {
+    async (request): Promise<DashboardStats> => {
       const supabase = getSupabaseClient();
+      const dateRange = request.query.date_range || 'all';
 
-      const { data, error } = await supabase.rpc('get_dashboard_stats');
+      const { data, error } = await supabase.rpc('get_dashboard_stats', {
+        date_range: dateRange,
+      });
 
       if (error) {
         logger.error({ error }, 'Failed to fetch dashboard stats');
         throw new Error('Failed to fetch dashboard stats');
       }
 
-      return data || {
+      return data?.[0] || {
         pending_verifications: 0,
         pending_fraud_reports: 0,
         claimed_count: 0,
@@ -167,10 +180,10 @@ export default async function adminRoutes(server: FastifyInstance) {
 
       const { data, error } = await supabase.rpc('insert_audit_log', {
         p_user_id: user_id,
-        p_action: action,
-        p_table_name: table_name,
-        p_record_id: record_id,
-        p_changes: changes,
+        p_action_type: action,
+        p_target_entity_type: table_name,
+        p_target_entity_id: record_id,
+        p_details: changes,
       });
 
       if (error) {
@@ -203,8 +216,8 @@ export default async function adminRoutes(server: FastifyInstance) {
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       const { data, error } = await supabase
-        .from('audit_table')
-        .select('*, user_table(*)')
+        .from('view_audit_logs_with_user_details')
+        .select('*')
         .order('timestamp', { ascending: false })
         .range(offsetNum, offsetNum + limitNum - 1);
 
@@ -213,7 +226,24 @@ export default async function adminRoutes(server: FastifyInstance) {
         throw new Error('Failed to fetch audit logs');
       }
 
-      return { logs: data || [] };
+      // Map view fields to expected frontend format
+      const logs = (data || []).map((log) => ({
+        audit_id: log.log_id,
+        user_id: log.user_id,
+        action: log.action_type,
+        table_name: 'audit_table',
+        record_id: log.log_id,
+        changes: log.details,
+        timestamp: log.timestamp,
+        user_table: {
+          user_id: log.user_id,
+          user_name: log.user_name,
+          email: log.email,
+          profile_picture_url: log.profile_picture_url,
+        },
+      }));
+
+      return { logs };
     }
   );
 
@@ -236,18 +266,33 @@ export default async function adminRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const logId = request.params.id;
 
-      const { data, error } = await supabase
-        .from('audit_table')
-        .select('*, user_table(*)')
-        .eq('audit_id', logId)
+      const { data: log, error } = await supabase
+        .from('view_audit_logs_with_user_details')
+        .select('*')
+        .eq('log_id', logId)
         .single();
 
-      if (error || !data) {
+      if (error || !log) {
         logger.error({ error, logId }, 'Failed to fetch audit log');
         throw new Error('Audit log not found');
       }
 
-      return data;
+      // Map view fields to expected frontend format
+      return {
+        audit_id: log.log_id,
+        user_id: log.user_id,
+        action: log.action_type,
+        table_name: 'audit_table',
+        record_id: log.log_id,
+        changes: log.details,
+        timestamp: log.timestamp,
+        user_table: {
+          user_id: log.user_id,
+          user_name: log.user_name,
+          email: log.email,
+          profile_picture_url: log.profile_picture_url,
+        },
+      };
     }
   );
 
@@ -280,8 +325,8 @@ export default async function adminRoutes(server: FastifyInstance) {
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       const { data, error } = await supabase
-        .from('audit_table')
-        .select('*, user_table(*)')
+        .from('view_audit_logs_with_user_details')
+        .select('*')
         .eq('user_id', userId)
         .order('timestamp', { ascending: false })
         .range(offsetNum, offsetNum + limitNum - 1);
@@ -291,7 +336,24 @@ export default async function adminRoutes(server: FastifyInstance) {
         throw new Error('Failed to fetch audit logs');
       }
 
-      return { logs: data || [] };
+      // Map view fields to expected frontend format
+      const logs = (data || []).map((log) => ({
+        audit_id: log.log_id,
+        user_id: log.user_id,
+        action: log.action_type,
+        table_name: 'audit_table',
+        record_id: log.log_id,
+        changes: log.details,
+        timestamp: log.timestamp,
+        user_table: {
+          user_id: log.user_id,
+          user_name: log.user_name,
+          email: log.email,
+          profile_picture_url: log.profile_picture_url,
+        },
+      }));
+
+      return { logs };
     }
   );
 
@@ -324,9 +386,9 @@ export default async function adminRoutes(server: FastifyInstance) {
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
       const { data, error } = await supabase
-        .from('audit_table')
-        .select('*, user_table(*)')
-        .eq('action', actionType)
+        .from('view_audit_logs_with_user_details')
+        .select('*')
+        .eq('action_type', actionType)
         .order('timestamp', { ascending: false })
         .range(offsetNum, offsetNum + limitNum - 1);
 
@@ -335,7 +397,24 @@ export default async function adminRoutes(server: FastifyInstance) {
         throw new Error('Failed to fetch audit logs');
       }
 
-      return { logs: data || [] };
+      // Map view fields to expected frontend format
+      const logs = (data || []).map((log) => ({
+        audit_id: log.log_id,
+        user_id: log.user_id,
+        action: log.action_type,
+        table_name: 'audit_table',
+        record_id: log.log_id,
+        changes: log.details,
+        timestamp: log.timestamp,
+        user_table: {
+          user_id: log.user_id,
+          user_name: log.user_name,
+          email: log.email,
+          profile_picture_url: log.profile_picture_url,
+        },
+      }));
+
+      return { logs };
     }
   );
 

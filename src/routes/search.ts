@@ -4,6 +4,7 @@ import { getGeminiService, RateLimitError } from '../services/gemini.js';
 import { requireAuth, requireStaff } from '../middleware/auth.js';
 import { SearchItemsRequest, SearchItemsStaffRequest } from '../types/search.js';
 import logger from '../utils/logger.js';
+import { logAudit, getUserName } from '../utils/audit-logger.js';
 
 interface MatchMissingItemRequest {
   post_id: string;
@@ -344,6 +345,26 @@ export default async function searchRoutes(server: FastifyInstance) {
       const filteredMatches = (matches || []).filter(
         (match: any) => match.post_id !== parseInt(post_id) && match.item_type === 'found'
       );
+
+      // Log to audit trail
+      const staffId = request.user?.user_id;
+      if (staffId) {
+        const staffName = await getUserName(staffId);
+        const itemName = itemData.item_name || 'Unknown Item';
+
+        await logAudit({
+          userId: staffId,
+          actionType: 'match_attempt',
+          details: {
+            message: `${staffName} initiated match generation for post ${itemName}`,
+            post_id: post_id,
+            item_name: itemName,
+            matches_found: filteredMatches.length,
+            timestamp: new Date().toISOString(),
+          },
+          recordId: post_id,
+        });
+      }
 
       logger.info({ post_id, matches_found: filteredMatches.length }, 'Match search completed');
 

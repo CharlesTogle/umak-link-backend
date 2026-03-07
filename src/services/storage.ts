@@ -12,6 +12,24 @@ export interface SignedUploadUrl {
   publicUrl: string;
 }
 
+// Allowed image types for upload validation
+const ALLOWED_IMAGE_TYPES = new Set([
+  'image/webp',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+]);
+
+// Map content types to file extensions
+const CONTENT_TYPE_TO_EXT: Record<string, string> = {
+  'image/webp': '.webp',
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+};
+
 export async function generateSignedUploadUrl(
   bucket: 'items' | 'profilePictures',
   fileName: string,
@@ -20,16 +38,27 @@ export async function generateSignedUploadUrl(
 ): Promise<SignedUploadUrl> {
   const supabase = getSupabaseClient();
   const bucketName = bucket === 'items' ? ITEMS_BUCKET : PROFILE_PICTURES_BUCKET;
-  const ext = path.extname(fileName).toLowerCase();
-  const safeExt =
-    ext && ext.length <= 10 && /^[a-z0-9.]+$/.test(ext) ? ext : '';
 
-  if (contentType !== 'image/webp' || safeExt !== '.webp') {
-    logger.warn({ bucket, fileName, contentType }, 'Rejected non-webp upload');
-    throw new Error('Only WebP uploads are allowed');
+  // Validate content type
+  if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
+    logger.warn({ bucket, fileName, contentType }, 'Rejected unsupported image type');
+    throw new Error(`Unsupported image type: ${contentType}. Allowed types: ${Array.from(ALLOWED_IMAGE_TYPES).join(', ')}`);
   }
 
-  const objectPath = `${Date.now()}-${crypto.randomUUID()}${safeExt}`;
+  // Get extension from content type (more reliable than filename)
+  const ext = CONTENT_TYPE_TO_EXT[contentType] || '.jpg';
+
+  // Validate extension from filename if provided
+  const fileExt = path.extname(fileName).toLowerCase();
+  if (fileExt && fileExt.length <= 10 && /^[a-z0-9.]+$/.test(fileExt)) {
+    // If filename has extension, ensure it matches content type
+    const expectedExt = CONTENT_TYPE_TO_EXT[contentType];
+    if (expectedExt && fileExt !== expectedExt) {
+      logger.warn({ bucket, fileName, contentType, fileExt, expectedExt }, 'Extension mismatch');
+    }
+  }
+
+  const objectPath = `${Date.now()}-${crypto.randomUUID()}${ext}`;
 
   const { data, error } = await supabase.storage
     .from(bucketName)
@@ -70,14 +99,24 @@ export async function confirmUpload(
 
   const match = data.find((item) => item.name === objectPath);
   const mimeType = match?.metadata?.mimetype as string | undefined;
-  if (!objectPath.toLowerCase().endsWith('.webp') || (mimeType && mimeType !== 'image/webp')) {
-    logger.warn({ bucket, objectPath, mimeType }, 'Rejected non-webp upload on confirm');
-    throw new Error('Only WebP uploads are allowed');
+
+  // Validate mime type is an allowed image type
+  if (mimeType && !ALLOWED_IMAGE_TYPES.has(mimeType)) {
+    logger.warn({ bucket, objectPath, mimeType }, 'Rejected unsupported image type on confirm');
+    throw new Error(`Unsupported image type: ${mimeType}`);
+  }
+
+  // Validate file extension matches allowed types
+  const ext = path.extname(objectPath).toLowerCase();
+  const allowedExts = new Set(Object.values(CONTENT_TYPE_TO_EXT));
+  if (!allowedExts.has(ext)) {
+    logger.warn({ bucket, objectPath, ext }, 'Rejected unsupported file extension on confirm');
+    throw new Error(`Unsupported file extension: ${ext}`);
   }
 
   const publicUrl = supabase.storage.from(bucketName).getPublicUrl(objectPath).data.publicUrl;
 
-  logger.info({ bucket, objectPath }, 'Upload confirmed');
+  logger.info({ bucket, objectPath, mimeType }, 'Upload confirmed');
   return { publicUrl };
 }
 

@@ -4,6 +4,7 @@ import { createNotification } from '../services/notifications.js';
 import { requireAuth, requireStaff } from '../middleware/auth.js';
 import { SendNotificationRequest, NotificationRecord } from '../types/notifications.js';
 import logger from '../utils/logger.js';
+import { logAudit, getUserName } from '../utils/audit-logger.js';
 
 type SupabaseErrorLike = {
   code?: string;
@@ -47,13 +48,34 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
+      const staffId = request.user?.user_id;
+
       const notificationId = await createNotification({
         ...request.body,
-        sent_by: request.user?.user_id ?? null,
+        sent_by: staffId ?? null,
       });
 
       if (!notificationId) {
         throw new Error('Failed to create notification');
+      }
+
+      // Log to audit trail
+      if (staffId) {
+        const staffName = await getUserName(staffId);
+
+        await logAudit({
+          userId: staffId,
+          actionType: 'notification_sent',
+          details: {
+            message: `${staffName} sent notification to user`,
+            notification_id: notificationId.toString(),
+            recipient_user_id: request.body.user_id,
+            notification_title: request.body.title,
+            notification_type: request.body.type,
+            timestamp: new Date().toISOString(),
+          },
+          recordId: notificationId.toString(),
+        });
       }
 
       logger.info({ notificationId }, 'Notification sent');

@@ -6,22 +6,92 @@ import { getPhilippineNowIso } from '../utils/time.js';
 
 let firebaseInitialized = false;
 
+interface FirebaseServiceAccount {
+  type: string;
+  project_id: string;
+  private_key_id: string;
+  private_key: string;
+  client_email: string;
+  client_id: string;
+  auth_uri: string;
+  token_uri: string;
+  auth_provider_x509_cert_url: string;
+  client_x509_cert_url: string;
+  universe_domain?: string;
+}
+
+function validateServiceAccount(obj: unknown): obj is FirebaseServiceAccount {
+  if (!obj || typeof obj !== 'object') {
+    return false;
+  }
+
+  const account = obj as Record<string, unknown>;
+  const requiredFields = ['type', 'project_id', 'private_key', 'client_email'];
+  const missingFields = requiredFields.filter((field) => !account[field] || typeof account[field] !== 'string');
+
+  if (missingFields.length > 0) {
+    logger.error(
+      { missingFields },
+      'Firebase service account is missing required fields. Check your FIREBASE_SERVICE_ACCOUNT environment variable.'
+    );
+    return false;
+  }
+
+  // Validate private_key format (should start with -----BEGIN PRIVATE KEY-----)
+  const privateKey = account.private_key as string;
+  if (!privateKey.includes('BEGIN PRIVATE KEY')) {
+    logger.error(
+      'Firebase service account private_key is invalid. It should contain "-----BEGIN PRIVATE KEY-----"'
+    );
+    return false;
+  }
+
+  return true;
+}
+
 function initializeFirebase(): void {
   if (firebaseInitialized) return;
 
-  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
-  if (serviceAccount) {
-    try {
-      admin.initializeApp({
-        credential: admin.credential.cert(JSON.parse(serviceAccount)),
-      });
-      firebaseInitialized = true;
-      logger.info('Firebase Admin initialized');
-    } catch (error) {
-      logger.error({ error }, 'Failed to initialize Firebase Admin');
-    }
-  } else {
+  const serviceAccountEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (!serviceAccountEnv) {
     logger.warn('FIREBASE_SERVICE_ACCOUNT not configured - push notifications disabled');
+    return;
+  }
+
+  try {
+    // Parse the JSON string
+    let serviceAccount: unknown;
+    try {
+      serviceAccount = JSON.parse(serviceAccountEnv);
+    } catch (parseError) {
+      logger.error(
+        { error: parseError },
+        'Failed to parse FIREBASE_SERVICE_ACCOUNT as JSON. Ensure it is a valid JSON string.'
+      );
+      return;
+    }
+
+    // Validate the service account structure
+    if (!validateServiceAccount(serviceAccount)) {
+      logger.error(
+        'Invalid Firebase service account format. Required fields: type, project_id, private_key, client_email. ' +
+        'Get your service account JSON from Firebase Console > Project Settings > Service Accounts > Generate New Private Key'
+      );
+      return;
+    }
+
+    // Initialize Firebase Admin
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
+    });
+
+    firebaseInitialized = true;
+    logger.info({ projectId: serviceAccount.project_id }, 'Firebase Admin initialized successfully');
+  } catch (error) {
+    logger.error(
+      { error },
+      'Failed to initialize Firebase Admin. Verify your service account credentials are correct.'
+    );
   }
 }
 
@@ -214,6 +284,26 @@ export async function sendGlobalAnnouncement(
 
   try {
     const createdAt = getPhilippineNowIso();
+
+    // Create image record if imageUrl is provided
+    let imageId: number | null = null;
+    if (imageUrl) {
+      const { data: imageData, error: imageError } = await supabase
+        .from('notification_image_table')
+        .insert({
+          image_url: imageUrl,
+          created_at: createdAt,
+        })
+        .select('image_id')
+        .single();
+
+      if (imageError) {
+        logger.warn({ error: imageError }, 'Failed to persist announcement image');
+      } else {
+        imageId = imageData?.image_id ?? null;
+      }
+    }
+
     // Create announcement record
     const { data: announcement, error: announcementError } = await supabase
       .from('global_announcements_table')
@@ -221,8 +311,8 @@ export async function sendGlobalAnnouncement(
         created_at: createdAt,
         message,
         description,
-        image_url: imageUrl,
-        created_by: senderId,
+        image_id: imageId,
+        sent_by: senderId,
       })
       .select()
       .single();

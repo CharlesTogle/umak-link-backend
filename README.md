@@ -192,6 +192,56 @@ SELECT cron.schedule(
 - CORS configured (update `CORS_ORIGIN` for production)
 - Helmet.js security headers
 
+## Troubleshooting
+
+### Firebase Push Notifications
+
+**Error**: "Service account object must contain a string 'private_key' property"
+
+**Cause**: The `FIREBASE_SERVICE_ACCOUNT` environment variable is missing, malformed, or incomplete.
+
+**Solution**:
+
+1. Go to [Firebase Console](https://console.firebase.google.com/)
+2. Select your project
+3. Go to Project Settings (gear icon) > Service Accounts
+4. Click "Generate New Private Key"
+5. Download the JSON file
+6. Convert it to a single-line JSON string:
+
+```bash
+# On Linux/Mac
+cat firebase-service-account.json | jq -c . | sed 's/"/\\"/g'
+
+# Or manually ensure it's valid JSON on one line
+```
+
+7. Set in `.env`:
+```bash
+FIREBASE_SERVICE_ACCOUNT='{"type":"service_account","project_id":"your-project-id","private_key_id":"...","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n","client_email":"...@...iam.gserviceaccount.com","client_id":"...","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs","client_x509_cert_url":"..."}'
+```
+
+**Required fields**:
+- `type`: Must be "service_account"
+- `project_id`: Your Firebase project ID
+- `private_key`: The RSA private key (must contain "-----BEGIN PRIVATE KEY-----")
+- `client_email`: Service account email
+
+**Note**: The private key contains `\n` characters for newlines - these must be preserved in the JSON string.
+
+### Common Issues
+
+**JWT Secret Not Set**
+- Ensure `JWT_SECRET` is a strong random string (use `openssl rand -base64 32`)
+
+**CORS Errors**
+- Update `CORS_ORIGIN` to match your frontend URL
+- For multiple origins, modify `src/app.ts` CORS configuration
+
+**Supabase Connection Failed**
+- Verify `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+- Check if your IP is allowed in Supabase dashboard
+
 ## License
 
 ISC

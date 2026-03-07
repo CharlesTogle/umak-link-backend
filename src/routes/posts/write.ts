@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../../services/supabase.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { CreatePostRequest, EditPostRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
+import { logAudit, getUserName } from '../../utils/audit-logger.js';
 
 export default async function postsWriteRoutes(server: FastifyInstance) {
   // POST /posts - Create new post
@@ -191,6 +192,14 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const postId = parseInt(request.params.id, 10);
+      const userId = request.user?.user_id;
+
+      // Get post details before deletion for audit log
+      const { data: postData } = await supabase
+        .from('post_public_view')
+        .select('item_name, poster_name')
+        .eq('post_id', postId)
+        .single();
 
       const { error } = await supabase.rpc('delete_post_by_id', {
         p_post_id: postId,
@@ -199,6 +208,24 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       if (error) {
         logger.error({ error, postId }, 'Failed to delete post');
         throw new Error(error.message || 'Failed to delete post');
+      }
+
+      // Log to audit trail if deleted by staff
+      if (userId && request.user?.user_type && ['Staff', 'Admin'].includes(request.user.user_type)) {
+        const staffName = await getUserName(userId);
+        const itemName = postData?.item_name || 'Unknown Item';
+
+        await logAudit({
+          userId,
+          actionType: 'post_deleted',
+          details: {
+            message: `${staffName} deleted the post ${itemName}`,
+            post_id: postId.toString(),
+            item_name: itemName,
+            deleted_at: new Date().toISOString(),
+          },
+          recordId: postId.toString(),
+        });
       }
 
       logger.info({ postId }, 'Post deleted');

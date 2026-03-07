@@ -8,6 +8,7 @@ import {
 } from '../types/fraud-reports.js';
 import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
+import { logAudit, getUserName } from '../utils/audit-logger.js';
 
 export default async function fraudReportsRoutes(server: FastifyInstance) {
   // GET /fraud-reports/check-duplicates - Check for duplicate reports
@@ -246,6 +247,14 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const reportId = request.params.id;
       const { status, processed_by_staff_id } = request.body;
+      const staffId = request.user?.user_id;
+
+      // Get report details for audit log
+      const { data: reportData } = await supabase
+        .from('fraud_reports_public_v')
+        .select('post_id, report_status')
+        .eq('report_id', reportId)
+        .single();
 
       const updateData: any = { report_status: status };
       if (processed_by_staff_id) {
@@ -260,6 +269,42 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       if (error) {
         logger.error({ error, reportId }, 'Failed to update fraud report status');
         throw new Error(error.message || 'Failed to update status');
+      }
+
+      // Log to audit trail
+      if (staffId && reportData) {
+        const staffName = await getUserName(staffId);
+
+        let actionType = '';
+        let message = '';
+
+        if (status === 'resolved') {
+          actionType = 'fraud_report_resolved';
+          message = `${staffName} resolved fraud report ${reportId}`;
+        } else if (status === 'rejected') {
+          actionType = 'fraud_report_rejected';
+          message = `${staffName} rejected fraud report ${reportId}`;
+        } else if (status === 'open' || status === 'under_review') {
+          actionType = 'fraud_report_marked_open';
+          message = `${staffName} marked fraud report ${reportId} as ${status}`;
+        } else {
+          actionType = 'fraud_report_status_changed';
+          message = `${staffName} changed fraud report status to ${status}`;
+        }
+
+        await logAudit({
+          userId: staffId,
+          actionType,
+          details: {
+            message,
+            report_id: reportId,
+            post_id: reportData.post_id?.toString(),
+            old_status: reportData.report_status,
+            new_status: status,
+            timestamp: new Date().toISOString(),
+          },
+          recordId: reportId,
+        });
       }
 
       logger.info({ reportId, status, processed_by_staff_id }, 'Fraud report status updated');
@@ -277,6 +322,14 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const reportId = request.params.id;
       const { delete_claim } = request.body;
+      const staffId = request.user?.user_id;
+
+      // Get report details for audit log
+      const { data: reportData } = await supabase
+        .from('fraud_reports_public_v')
+        .select('post_id')
+        .eq('report_id', reportId)
+        .single();
 
       const { data, error } = await supabase.rpc('resolve_fraud_report', {
         p_report_id: reportId,
@@ -286,6 +339,24 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       if (error) {
         logger.error({ error, reportId }, 'Failed to resolve fraud report');
         throw new Error(error.message || 'Failed to resolve fraud report');
+      }
+
+      // Log to audit trail
+      if (staffId) {
+        const staffName = await getUserName(staffId);
+
+        await logAudit({
+          userId: staffId,
+          actionType: 'fraud_report_resolved',
+          details: {
+            message: `${staffName} resolved fraud report ${reportId}${delete_claim ? ' and deleted the claim' : ''}`,
+            report_id: reportId,
+            post_id: reportData?.post_id?.toString(),
+            delete_claim: delete_claim || false,
+            resolved_at: new Date().toISOString(),
+          },
+          recordId: reportId,
+        });
       }
 
       logger.info({ reportId }, 'Fraud report resolved');

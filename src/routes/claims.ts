@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../services/supabase.js';
 import { requireStaff } from '../middleware/auth.js';
 import { ProcessClaimRequest, ExistingClaimResponse } from '../types/claims.js';
 import logger from '../utils/logger.js';
+import { logAudit, getUserName } from '../utils/audit-logger.js';
 
 export default async function claimsRoutes(server: FastifyInstance) {
   // POST /claims/process - Process a claim
@@ -44,6 +45,25 @@ export default async function claimsRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const { found_post_id, missing_post_id, claim_details } = request.body;
+      const staffId = request.user?.user_id || claim_details.staff_id;
+
+      // Check if claim already exists (for overwrite detection)
+      const { data: postData } = await supabase
+        .from('post_public_view')
+        .select('item_id, item_name')
+        .eq('post_id', found_post_id)
+        .single();
+
+      let existingClaim = null;
+      if (postData?.item_id) {
+        const { data: claimData } = await supabase
+          .from('claim_table')
+          .select('claim_id, claimer_name, claimer_school_email, claimer_contact_num, claimed_at')
+          .eq('item_id', postData.item_id)
+          .single();
+
+        existingClaim = claimData;
+      }
 
       const { data, error } = await supabase.rpc('process_claim', {
         p_found_post_id: found_post_id,
@@ -54,6 +74,61 @@ export default async function claimsRoutes(server: FastifyInstance) {
       if (error) {
         logger.error({ error }, 'Failed to process claim');
         throw new Error(error.message || 'Failed to process claim');
+      }
+
+      // Log to audit trail
+      if (staffId) {
+        const staffName = await getUserName(staffId);
+        const itemName = postData?.item_name || 'Unknown Item';
+
+        if (existingClaim) {
+          // Claim overwrite
+          await logAudit({
+            userId: staffId,
+            actionType: 'claim_overwritten',
+            details: {
+              message: `${staffName} overwritten claim for ${itemName}`,
+              item_id: postData?.item_id,
+              item_name: itemName,
+              found_post_id: found_post_id,
+              missing_post_id: missing_post_id,
+              old_claim: {
+                claim_id: existingClaim.claim_id,
+                claimer_name: existingClaim.claimer_name,
+                claimer_email: existingClaim.claimer_school_email,
+                claimer_contact: existingClaim.claimer_contact_num,
+                claimed_at: existingClaim.claimed_at,
+              },
+              new_claim: {
+                claimer_name: claim_details.claimer_name,
+                claimer_email: claim_details.claimer_school_email,
+                claimer_contact: claim_details.claimer_contact_num,
+                processed_by_staff: claim_details.staff_name,
+              },
+              timestamp: new Date().toISOString(),
+            },
+            recordId: data?.toString() || found_post_id.toString(),
+          });
+        } else {
+          // New claim
+          await logAudit({
+            userId: staffId,
+            actionType: 'claim_processed',
+            details: {
+              message: `${staffName} processed claim for ${itemName}`,
+              item_id: postData?.item_id,
+              item_name: itemName,
+              found_post_id: found_post_id,
+              missing_post_id: missing_post_id,
+              claimer_name: claim_details.claimer_name,
+              claimer_email: claim_details.claimer_school_email,
+              claimer_contact: claim_details.claimer_contact_num,
+              processed_by_staff: claim_details.staff_name,
+              timestamp: new Date().toISOString(),
+            },
+            recordId: data?.toString() || found_post_id.toString(),
+          });
+        }
       }
 
       logger.info({ foundPostId: found_post_id }, 'Claim processed');

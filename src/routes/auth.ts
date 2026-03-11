@@ -380,4 +380,101 @@ export default async function authRoutes(server: FastifyInstance) {
       };
     }
   );
+
+  // POST /auth/update-picture-from-google - Update profile picture from Google
+  server.post<{ Body: { googleIdToken: string } }>(
+    '/update-picture-from-google',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['googleIdToken'],
+          properties: {
+            googleIdToken: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!request.user) {
+        reply.status(401).send({ error: 'Unauthorized' });
+        return;
+      }
+
+      if (!oauthClient) {
+        reply.status(500).send({ error: 'Google OAuth not configured' });
+        return;
+      }
+
+      const { googleIdToken } = request.body;
+
+      try {
+        // Verify Google ID token
+        const ticket = await withTimeout(
+          oauthClient.verifyIdToken({
+            idToken: googleIdToken,
+            audience: GOOGLE_CLIENT_ID,
+          }),
+          DEFAULT_TIMEOUT_MS,
+          'Google token verification'
+        );
+
+        const payload = ticket.getPayload();
+        if (!payload || !payload.email || !payload.picture) {
+          reply.status(400).send({ error: 'Invalid Google token or no picture available' });
+          return;
+        }
+
+        // Verify the token belongs to the current user
+        if (payload.email.trim().toLowerCase() !== request.user.email.toLowerCase()) {
+          reply.status(403).send({ error: 'Token does not match current user' });
+          return;
+        }
+
+        const supabase = getSupabaseClient();
+
+        // Upload profile picture
+        const uploadedUrl = await uploadProfilePicture(supabase, request.user.user_id, payload.picture);
+
+        if (!uploadedUrl) {
+          reply.status(500).send({ error: 'Failed to upload profile picture' });
+          return;
+        }
+
+        // Update user profile
+        const { data: updatedUser, error } = await supabase
+          .from('user_table')
+          .update({ profile_picture_url: uploadedUrl })
+          .eq('user_id', request.user.user_id)
+          .select()
+          .single();
+
+        if (error || !updatedUser) {
+          logger.error({ error, userId: request.user.user_id }, 'Failed to update profile picture');
+          reply.status(500).send({ error: 'Failed to update profile' });
+          return;
+        }
+
+        logger.info({ userId: request.user.user_id }, 'Profile picture updated from Google');
+
+        return {
+          success: true,
+          profile_picture_url: uploadedUrl,
+          user: {
+            user_id: updatedUser.user_id,
+            user_name: updatedUser.user_name,
+            email: updatedUser.email,
+            profile_picture_url: updatedUser.profile_picture_url,
+            user_type: updatedUser.user_type,
+            notification_token: updatedUser.notification_token,
+          },
+        };
+      } catch (error) {
+        logger.error({ error }, 'Failed to update profile picture from Google');
+        reply.status(500).send({ error: 'Failed to update profile picture' });
+      }
+    }
+  );
 }

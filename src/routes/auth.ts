@@ -185,7 +185,8 @@ export default async function authRoutes(server: FastifyInstance) {
           return {} as AuthLoginResponse;
         }
 
-        if (payload.picture) {
+        // Only upload profile picture if user doesn't have one yet (first-time login)
+        if (payload.picture && !user.profile_picture_url) {
           const uploadedUrl = await uploadProfilePicture(supabase, user.user_id, payload.picture);
           if (uploadedUrl) {
             const { data: updatedUser, error: updateError } = await supabase

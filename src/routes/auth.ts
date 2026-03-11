@@ -7,6 +7,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { AuthLoginRequest, AuthLoginResponse, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
 import { getPhilippineNowIso } from '../utils/time.js';
+import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 const JWT_SECRET: string = (() => {
   const secret = process.env.JWT_SECRET;
@@ -47,7 +48,11 @@ async function uploadProfilePicture(
   imageUrl: string
 ): Promise<string | null> {
   try {
-    const response = await fetch(imageUrl);
+    const response = await withTimeout(
+      fetch(imageUrl),
+      DEFAULT_TIMEOUT_MS,
+      'Fetch Google profile image'
+    );
     if (!response.ok) {
       logger.warn({ status: response.status }, 'Failed to fetch Google profile image');
       return null;
@@ -111,11 +116,15 @@ export default async function authRoutes(server: FastifyInstance) {
       }
 
       try {
-        // Verify Google ID token
-        const ticket = await oauthClient.verifyIdToken({
-          idToken: googleIdToken,
-          audience: GOOGLE_CLIENT_ID,
-        });
+        // Verify Google ID token with timeout
+        const ticket = await withTimeout(
+          oauthClient.verifyIdToken({
+            idToken: googleIdToken,
+            audience: GOOGLE_CLIENT_ID,
+          }),
+          DEFAULT_TIMEOUT_MS,
+          'Google token verification'
+        );
 
         const payload = ticket.getPayload();
         if (!payload || !payload.email || !payload.sub) {

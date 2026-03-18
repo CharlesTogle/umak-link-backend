@@ -428,7 +428,7 @@ export default async function authRoutes(server: FastifyInstance) {
         }
 
         // Verify the token belongs to the current user
-        if (payload.email.trim().toLowerCase() !== request.user.email.toLowerCase()) {
+        if (!request.user.email || payload.email.trim().toLowerCase() !== request.user.email.toLowerCase()) {
           reply.status(403).send({ error: 'Token does not match current user' });
           return;
         }
@@ -474,6 +474,7 @@ export default async function authRoutes(server: FastifyInstance) {
       } catch (error) {
         logger.error({ error }, 'Failed to update profile picture from Google');
         reply.status(500).send({ error: 'Failed to update profile picture' });
+        return;
       }
     }
   );

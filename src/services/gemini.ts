@@ -42,7 +42,7 @@ class GeminiService {
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
       this.client = new GoogleGenerativeAI(apiKey);
-      this.model = this.client.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      this.model = this.client.getGenerativeModel({ model: 'gemini-2.5-flash' });
       logger.info('Gemini service initialized');
     } else {
       logger.warn('GEMINI_API_KEY not configured - AI features disabled');
@@ -117,21 +117,46 @@ class GeminiService {
     }
 
     const prompt = this.buildCreatePostAutofillPrompt(input);
-    const result = await withTimeout(
-      this.model.generateContent([
-        { text: prompt },
-        {
-          inlineData: {
-            mimeType: input.mimeType,
-            data: input.imageBase64,
-          },
-        },
-      ]),
-      DEFAULT_TIMEOUT_MS,
-      'Gemini create-post autofill'
+
+    logger.info(
+      { mimeType: input.mimeType, imageSize: input.imageBase64.length },
+      'Sending create-post autofill request to Gemini'
     );
 
+    let result;
+    try {
+      result = await withTimeout(
+        this.model.generateContent([
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: input.mimeType,
+              data: input.imageBase64,
+            },
+          },
+        ]),
+        DEFAULT_TIMEOUT_MS,
+        'Gemini create-post autofill'
+      );
+    } catch (error: unknown) {
+      const errObj = error as Record<string, unknown>;
+      logger.error(
+        {
+          status: errObj?.status ?? errObj?.['statusCode'],
+          statusText: errObj?.statusText,
+          message: errObj?.message,
+          errorDetails: errObj?.errorDetails,
+        },
+        'Gemini API call failed for create-post autofill'
+      );
+      throw error;
+    }
+
     const responseText = result.response.text();
+    logger.info(
+      { responseLength: responseText.length },
+      'Gemini create-post autofill response received'
+    );
     return this.parseCreatePostAutofillResponse(responseText);
   }
 

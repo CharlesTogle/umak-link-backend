@@ -189,7 +189,7 @@ SELECT cron.schedule(
 - JWT tokens expire after 7 days by default
 - Role-based access control (User/Staff/Admin)
 - Rate limiting enabled (100 req/min per IP)
-- CORS configured (update `CORS_ORIGIN` for production)
+- CORS configured (update `ALLOWED_ORIGINS` for production)
 - Helmet.js security headers
 
 ## Troubleshooting
@@ -235,8 +235,8 @@ FIREBASE_SERVICE_ACCOUNT='{"type":"service_account","project_id":"your-project-i
 - Ensure `JWT_SECRET` is a strong random string (use `openssl rand -base64 32`)
 
 **CORS Errors**
-- Update `CORS_ORIGIN` to match your frontend URL
-- For multiple origins, modify `src/app.ts` CORS configuration
+- Update `ALLOWED_ORIGINS` to match your frontend URL(s) (comma-separated)
+- Example: `ALLOWED_ORIGINS=https://app.example.com,https://www.example.com`
 
 **Supabase Connection Failed**
 - Verify `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`

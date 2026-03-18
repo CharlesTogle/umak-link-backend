@@ -40,6 +40,7 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       type?: 'public' | 'pending' | 'staff' | 'own';
       item_type?: 'found' | 'missing';
       status?: string;
+      item_status?: string;
       poster_id?: string;
       item_id?: string;
       linked_item_id?: string;
@@ -57,6 +58,7 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       type,
       item_type,
       status,
+      item_status,
       poster_id,
       item_id,
       linked_item_id,
@@ -88,6 +90,9 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
     if (status) {
       query = query.eq('post_status', status);
+    }
+    if (item_status) {
+      query = query.eq('item_status', item_status);
     }
     if (poster_id && type !== 'own') {
       query = query.eq('poster_id', poster_id);
@@ -156,6 +161,9 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       if (status) {
         countQuery = countQuery.eq('post_status', status);
       }
+      if (item_status) {
+        countQuery = countQuery.eq('item_status', item_status);
+      }
 
       const { count, error: countError } = await countQuery;
       if (!countError) {
@@ -191,11 +199,12 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       type?: 'public' | 'pending' | 'staff' | 'own';
       item_type?: 'found' | 'missing';
       status?: string;
+      item_status?: string;
       poster_id?: string;
     };
   }>('/count', async (request) => {
     const supabase = getSupabaseClient();
-    const { type, item_type, status, poster_id } = request.query;
+    const { type, item_type, status, item_status, poster_id } = request.query;
 
     let query = supabase.from('post_public_view').select('*', { count: 'exact', head: true });
 
@@ -212,6 +221,9 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
     if (status) {
       query = query.eq('post_status', status);
+    }
+    if (item_status) {
+      query = query.eq('item_status', item_status);
     }
 
     const { count, error } = await query;

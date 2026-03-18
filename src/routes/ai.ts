@@ -44,6 +44,17 @@ export default async function aiRoutes(server: FastifyInstance) {
     async (request, reply) => {
       try {
         const { mimeType, base64 } = parseImageDataUrl(request.body.image_data_url);
+        logger.info(
+          {
+            mimeType,
+            base64Length: base64.length,
+            hasTitle: !!request.body.current_title,
+            hasDescription: !!request.body.current_description,
+            hasCategory: !!request.body.current_category,
+          },
+          'create-post-autofill request received'
+        );
+
         const gemini = getGeminiService();
 
         const content = await gemini.generateCreatePostAutofill({
@@ -54,9 +65,11 @@ export default async function aiRoutes(server: FastifyInstance) {
           currentCategory: request.body.current_category,
         });
 
+        logger.info({ content }, 'create-post-autofill succeeded');
         return { success: true, content };
       } catch (error) {
         if (error instanceof RateLimitError) {
+          logger.warn('create-post-autofill rate limited');
           return reply.status(429).send({
             success: false,
             error: 'rate_limit_exceeded',
@@ -65,6 +78,7 @@ export default async function aiRoutes(server: FastifyInstance) {
         }
 
         if (error instanceof Error && error.message === 'Gemini service not configured') {
+          logger.warn('create-post-autofill called but Gemini not configured');
           return reply.status(503).send({
             success: false,
             error: 'ai_unavailable',
@@ -72,7 +86,16 @@ export default async function aiRoutes(server: FastifyInstance) {
           });
         }
 
-        logger.error({ error }, 'Failed to generate create-post autofill');
+        const errObj = error as Record<string, unknown>;
+        logger.error(
+          {
+            status: errObj?.status ?? errObj?.['statusCode'],
+            statusText: errObj?.statusText,
+            message: errObj?.message,
+            stack: errObj?.stack,
+          },
+          'Failed to generate create-post autofill'
+        );
         return reply.status(500).send({
           success: false,
           error: 'ai_generation_failed',

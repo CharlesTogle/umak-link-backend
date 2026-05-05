@@ -141,6 +141,20 @@ async function createNotificationImageId(
   return data?.image_id ?? null;
 }
 
+function getNotificationUrl(type: string, data?: Record<string, unknown>): string {
+  if (data?.link && typeof data.link === 'string') return data.link;
+  const postId = data?.postId ?? data?.post_id;
+  switch (type) {
+    case 'match':
+      return postId ? `/user/post/view/${String(postId)}` : '/user/matches';
+    case 'accept':
+    case 'post_accepted':
+      return postId ? `/user/post/view/${String(postId)}` : '/user/notifications';
+    default:
+      return '/user/notifications';
+  }
+}
+
 export async function sendPushNotification(
   token: string,
   payload: NotificationPayload
@@ -162,6 +176,7 @@ export async function sendPushNotification(
       },
       data: {
         type: payload.type,
+        url: getNotificationUrl(payload.type, payload.data),
         ...Object.fromEntries(
           Object.entries(payload.data || {}).map(([k, v]) => [k, String(v)])
         ),

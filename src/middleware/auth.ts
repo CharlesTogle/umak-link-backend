@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { getSupabaseClient } from '../services/supabase.js';
 import { JwtPayload, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
+import { getPhilippineNowIso } from '../utils/time.js';
 
 const JWT_SECRET: string = (() => {
   const secret = process.env.JWT_SECRET;
@@ -30,6 +31,90 @@ function isJwtPayloadShape(decoded: string | jwt.JwtPayload): decoded is JwtPayl
   if (typeof decoded.user_id !== 'string' || decoded.user_id.length === 0) return false;
   if (decoded.email !== null && typeof decoded.email !== 'string') return false;
   return isAllowedUserType(decoded.user_type);
+}
+
+function normalizeNameToTitleCase(name: string | null | undefined): string | null {
+  if (!name) return null;
+
+  return name
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function getUserMetadataValue(
+  metadata: Record<string, unknown> | undefined,
+  key: string
+): string | null {
+  const value = metadata?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPayload | null> {
+  try {
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase.auth.getUser(token);
+    const authUser = data.user;
+
+    if (error || !authUser?.email) {
+      logger.debug({ error }, 'Supabase token validation failed');
+      return null;
+    }
+
+    const normalizedEmail = authUser.email.trim().toLowerCase();
+    const allowedDomain = (process.env.ALLOWED_EMAIL_DOMAIN || 'umak.edu.ph').trim().toLowerCase();
+    if (!normalizedEmail.endsWith(`@${allowedDomain}`)) {
+      logger.warn({ email: normalizedEmail }, 'Blocked Supabase-authenticated user from unauthorized email domain');
+      return null;
+    }
+
+    const normalizedName = normalizeNameToTitleCase(
+      getUserMetadataValue(authUser.user_metadata, 'full_name') ??
+      getUserMetadataValue(authUser.user_metadata, 'name')
+    );
+    const profilePictureUrl =
+      getUserMetadataValue(authUser.user_metadata, 'avatar_url') ??
+      getUserMetadataValue(authUser.user_metadata, 'picture');
+
+    const loginTimestamp = getPhilippineNowIso();
+    const { data: upsertedUser, error: upsertError } = await supabase
+      .from('user_table')
+      .upsert(
+        {
+          email: normalizedEmail,
+          user_name: normalizedName,
+          last_login: loginTimestamp,
+        },
+        {
+          onConflict: 'email',
+        }
+      )
+      .select('user_id, email, user_type, profile_picture_url')
+      .single();
+
+    if (upsertError || !upsertedUser || !isAllowedUserType(upsertedUser.user_type)) {
+      logger.warn({ error: upsertError, email: normalizedEmail }, 'Failed to resolve portal user from Supabase-authenticated user');
+      return null;
+    }
+
+    if (profilePictureUrl && !upsertedUser.profile_picture_url) {
+      await supabase
+        .from('user_table')
+        .update({ profile_picture_url: profilePictureUrl })
+        .eq('user_id', upsertedUser.user_id);
+    }
+
+    return {
+      user_id: upsertedUser.user_id,
+      email: upsertedUser.email,
+      user_type: upsertedUser.user_type,
+    };
+  } catch (error) {
+    logger.debug({ error }, 'Supabase auth resolution unavailable');
+    return null;
+  }
 }
 
 async function syncAuthoritativeUser(request: FastifyRequest): Promise<boolean> {
@@ -94,11 +179,18 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
       iat: decoded.iat,
       exp: decoded.exp,
     };
+    return;
   } catch (error) {
-    logger.debug({ error }, 'Invalid token');
+    logger.debug({ error }, 'Token was not a valid legacy JWT, trying Supabase auth');
+  }
+
+  const supabaseUser = await resolvePortalUserFromSupabaseToken(token);
+  if (!supabaseUser) {
     reply.status(401).send({ error: 'Unauthorized', message: 'Invalid token' });
     return;
   }
+
+  request.user = supabaseUser;
 }
 
 export async function requireStaff(request: FastifyRequest, reply: FastifyReply): Promise<void> {

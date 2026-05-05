@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import sharp from 'sharp';
 import { getSupabaseClient } from '../services/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
-import { AuthLoginRequest, AuthLoginResponse, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
+import { AuthLoginRequest, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
 import { getPhilippineNowIso } from '../utils/time.js';
 import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
@@ -107,12 +107,11 @@ export default async function authRoutes(server: FastifyInstance) {
         },
       },
     },
-    async (request, reply): Promise<AuthLoginResponse> => {
+    async (request, reply) => {
       const { googleIdToken } = request.body;
 
       if (!oauthClient) {
-        reply.status(500).send({ error: 'Google OAuth not configured' });
-        return {} as AuthLoginResponse;
+        return reply.status(500).send({ error: 'Google OAuth not configured' });
       }
 
       try {
@@ -128,16 +127,14 @@ export default async function authRoutes(server: FastifyInstance) {
 
         const payload = ticket.getPayload();
         if (!payload || !payload.email || !payload.sub) {
-          reply.status(400).send({ error: 'Invalid Google token' });
-          return {} as AuthLoginResponse;
+          return reply.status(400).send({ error: 'Invalid Google token' });
         }
 
         if (payload.email_verified !== true) {
-          reply.status(403).send({
+          return reply.status(403).send({
             error: 'Access Denied',
             message: 'Only verified organization emails are allowed',
           });
-          return {} as AuthLoginResponse;
         }
 
         const normalizedEmail = payload.email.trim().toLowerCase();
@@ -145,11 +142,10 @@ export default async function authRoutes(server: FastifyInstance) {
         // Check if email is from allowed domain (UMak)
         const allowedDomain = (process.env.ALLOWED_EMAIL_DOMAIN || 'umak.edu.ph').trim().toLowerCase();
         if (!normalizedEmail.endsWith(`@${allowedDomain}`)) {
-          reply.status(403).send({
+          return reply.status(403).send({
             error: 'Access Denied',
             message: 'Please use your organization email to sign in',
           });
-          return {} as AuthLoginResponse;
         }
 
         const supabase = getSupabaseClient();
@@ -175,14 +171,12 @@ export default async function authRoutes(server: FastifyInstance) {
 
         if (upsertError || !user) {
           logger.error({ error: upsertError }, 'Failed to upsert user');
-          reply.status(500).send({ error: 'Failed to create user session' });
-          return {} as AuthLoginResponse;
+          return reply.status(500).send({ error: 'Failed to create user session' });
         }
 
         if (!isAllowedUserType(user.user_type)) {
           logger.error({ userId: user.user_id, userType: user.user_type }, 'Invalid user role in database');
-          reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
-          return {} as AuthLoginResponse;
+          return reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
         }
 
         // Only upload profile picture if user doesn't have one yet (first-time login)
@@ -212,7 +206,7 @@ export default async function authRoutes(server: FastifyInstance) {
 
         logger.info({ userId: user.user_id, email: user.email }, 'User logged in');
 
-        return {
+        return reply.send({
           token,
           user: {
             user_id: user.user_id,
@@ -222,11 +216,10 @@ export default async function authRoutes(server: FastifyInstance) {
             user_type: user.user_type,
             notification_token: user.notification_token,
           },
-        };
+        });
       } catch (error) {
         logger.error({ error }, 'Google auth error');
-        reply.status(401).send({ error: 'Authentication failed', message: String(error) });
-        return {} as AuthLoginResponse;
+        return reply.status(401).send({ error: 'Authentication failed', message: String(error) });
       }
     }
   );

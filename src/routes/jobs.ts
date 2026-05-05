@@ -34,11 +34,10 @@ export default async function jobsRoutes(server: FastifyInstance) {
     const supabase = getSupabaseClient();
     const geminiService = getGeminiService();
 
-    // Get items without metadata
+    // Get accepted posts that are still missing metadata and have an image
     const { data: items, error } = await supabase
-      .from('item_table')
+      .from('items_pending_metadata')
       .select('item_id, item_name, item_description, category, item_type')
-      .is('metadata', null)
       .limit(10);
 
     if (error) {
@@ -62,7 +61,7 @@ export default async function jobsRoutes(server: FastifyInstance) {
 
         await supabase
           .from('item_table')
-          .update({ metadata })
+          .update({ item_metadata: metadata })
           .eq('item_id', item.item_id);
 
         succeeded++;

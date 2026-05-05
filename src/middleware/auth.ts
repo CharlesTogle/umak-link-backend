@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { getSupabaseClient } from '../services/supabase.js';
 import { JwtPayload, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
+import { extractBearerToken, getAuthorizationHeader } from '../utils/http-headers.js';
 import { getPhilippineNowIso } from '../utils/time.js';
 
 const JWT_SECRET: string = (() => {
@@ -13,17 +14,10 @@ const JWT_SECRET: string = (() => {
   return secret;
 })();
 
-const JWT_BEARER_PATTERN = /^Bearer ([A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+)$/;
 const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin'];
 
 function isAllowedUserType(value: unknown): value is UserType {
   return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
-}
-
-function extractBearerToken(authHeader: string | undefined): string | null {
-  if (!authHeader) return null;
-  const match = authHeader.match(JWT_BEARER_PATTERN);
-  return match ? match[1] : null;
 }
 
 function isJwtPayloadShape(decoded: string | jwt.JwtPayload): decoded is JwtPayload {
@@ -156,8 +150,18 @@ async function syncAuthoritativeUser(request: FastifyRequest): Promise<boolean> 
 }
 
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  const token = extractBearerToken(request.headers.authorization);
+  const authorizationHeader = getAuthorizationHeader(request);
+  const token = extractBearerToken(authorizationHeader);
   if (!token) {
+    logger.warn(
+      {
+        requestAuthorizationHeaderPresent: typeof authorizationHeader === 'string',
+        requestAuthorizationScheme: authorizationHeader?.trim().split(/\s+/, 1)[0] ?? null,
+        requestHeadersAuthorizationPresent: typeof request.headers.authorization !== 'undefined',
+        rawHeadersAuthorizationPresent: typeof request.raw.headers.authorization !== 'undefined',
+      },
+      'Missing or malformed authorization header'
+    );
     reply.status(401).send({ error: 'Unauthorized', message: 'No token provided' });
     return;
   }

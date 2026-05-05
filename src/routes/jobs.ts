@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../services/supabase.js';
 import { getGeminiService } from '../services/gemini.js';
 import { GenerateMetadataBatchResponse, ProcessPendingMatchResponse } from '../types/notifications.js';
+import { getAuthorizationHeader } from '../utils/http-headers.js';
 import logger from '../utils/logger.js';
 
 // System token for scheduled jobs
@@ -27,7 +28,7 @@ export default async function jobsRoutes(server: FastifyInstance) {
       },
     },
     async (request): Promise<GenerateMetadataBatchResponse> => {
-    if (!verifySystemToken(request.headers.authorization)) {
+    if (!verifySystemToken(getAuthorizationHeader(request))) {
       throw new Error('Unauthorized');
     }
 
@@ -92,7 +93,7 @@ export default async function jobsRoutes(server: FastifyInstance) {
       },
     },
     async (request): Promise<ProcessPendingMatchResponse> => {
-    if (!verifySystemToken(request.headers.authorization)) {
+    if (!verifySystemToken(getAuthorizationHeader(request))) {
       throw new Error('Unauthorized');
     }
 

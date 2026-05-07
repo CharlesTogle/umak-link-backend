@@ -1,6 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import logger from '../utils/logger.js';
-import { DEFAULT_TIMEOUT_MS } from '../utils/timeout.js';
+import { DATABASE_TIMEOUT_MS } from '../utils/timeout.js';
 
 let supabase: SupabaseClient | null = null;
 
@@ -16,7 +16,7 @@ export function getSupabaseClient(): SupabaseClient {
 
     const timeoutFetch: typeof fetch = async (input, init = {}) => {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+      const timeout = setTimeout(() => controller.abort(), DATABASE_TIMEOUT_MS);
       const signal =
         init.signal && 'any' in AbortSignal
           ? AbortSignal.any([init.signal, controller.signal])

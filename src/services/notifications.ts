@@ -1,7 +1,7 @@
 import admin from 'firebase-admin';
 import logger from '../utils/logger.js';
 import { getSupabaseClient } from './supabase.js';
-import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
+import { PUSH_NOTIFICATION_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 import { getPhilippineNowIso } from '../utils/time.js';
 
 let firebaseInitialized = false;
@@ -104,6 +104,9 @@ export interface NotificationPayload {
   data?: Record<string, unknown>;
   image_url?: string | null;
   sent_by?: string | null;
+  image_id?: number | null;
+  global_announcement_id?: number | null;
+  skip_push?: boolean;
 }
 
 type SupabaseErrorLike = {
@@ -111,10 +114,16 @@ type SupabaseErrorLike = {
   message?: string;
 };
 
+type NotificationRecipientRole = 'User' | 'Staff' | 'Admin';
+
 function isMissingColumnError(error: unknown, column: string): boolean {
   const typed = error as SupabaseErrorLike | null;
   if (!typed) return false;
   return typed.code === 'PGRST204' && typeof typed.message === 'string' && typed.message.includes(`'${column}'`);
+}
+
+function isNotificationRecipientRole(value: unknown): value is NotificationRecipientRole {
+  return value === 'User' || value === 'Staff' || value === 'Admin';
 }
 
 async function createNotificationImageId(
@@ -141,17 +150,41 @@ async function createNotificationImageId(
   return data?.image_id ?? null;
 }
 
-function getNotificationUrl(type: string, data?: Record<string, unknown>): string {
+function getNotificationsPathForRole(role: NotificationRecipientRole): string {
+  if (role === 'Staff') return '/staff/notifications';
+  if (role === 'Admin') return '/admin/notifications';
+  return '/user/notifications';
+}
+
+function getPostPathForRole(role: NotificationRecipientRole, postId: string): string {
+  if (role === 'Staff') return `/staff/post-record/view/${postId}`;
+  if (role === 'Admin') return '/admin/notifications';
+  return `/user/post/view/${postId}`;
+}
+
+function getNotificationUrl(
+  type: string,
+  data?: Record<string, unknown>,
+  role: NotificationRecipientRole = 'User'
+): string | null {
   if (data?.link && typeof data.link === 'string') return data.link;
+  if (data?.href && typeof data.href === 'string') return data.href;
+  if (data?.url && typeof data.url === 'string') return data.url;
+
   const postId = data?.postId ?? data?.post_id;
+  const normalizedPostId =
+    typeof postId === 'string' || typeof postId === 'number' ? String(postId) : null;
+
   switch (type) {
+    case 'global_announcement':
+      return null;
     case 'match':
-      return postId ? `/user/post/view/${String(postId)}` : '/user/matches';
+      return normalizedPostId ? getPostPathForRole(role, normalizedPostId) : getNotificationsPathForRole(role);
     case 'accept':
     case 'post_accepted':
-      return postId ? `/user/post/view/${String(postId)}` : '/user/notifications';
+      return normalizedPostId ? getPostPathForRole(role, normalizedPostId) : getNotificationsPathForRole(role);
     default:
-      return '/user/notifications';
+      return getNotificationsPathForRole(role);
   }
 }
 
@@ -176,7 +209,9 @@ export async function sendPushNotification(
       },
       data: {
         type: payload.type,
-        url: getNotificationUrl(payload.type, payload.data),
+        ...(getNotificationUrl(payload.type, payload.data)
+          ? { url: getNotificationUrl(payload.type, payload.data)! }
+          : {}),
         ...Object.fromEntries(
           Object.entries(payload.data || {}).map(([k, v]) => [k, String(v)])
         ),
@@ -199,7 +234,7 @@ export async function sendPushNotification(
 
     await withTimeout(
       admin.messaging().send(message),
-      DEFAULT_TIMEOUT_MS,
+      PUSH_NOTIFICATION_TIMEOUT_MS,
       'Firebase send'
     );
     logger.info({ userId: payload.user_id, type: payload.type }, 'Push notification sent');
@@ -214,8 +249,27 @@ export async function createNotification(payload: NotificationPayload): Promise<
   const supabase = getSupabaseClient();
 
   try {
-    const imageId = await createNotificationImageId(payload.image_url);
+    const imageId =
+      payload.image_id ?? (await createNotificationImageId(payload.image_url));
     const createdAt = getPhilippineNowIso();
+    const { data: userData, error: userLookupError } = await supabase
+      .from('user_table')
+      .select('notification_token, user_type')
+      .eq('user_id', payload.user_id)
+      .single();
+
+    if (userLookupError) {
+      logger.warn({ error: userLookupError, userId: payload.user_id }, 'Failed to fetch notification recipient metadata');
+    }
+
+    const recipientRole = isNotificationRecipientRole(userData?.user_type)
+      ? userData.user_type
+      : 'User';
+    const resolvedUrl = getNotificationUrl(payload.type, payload.data, recipientRole);
+    const notificationData = {
+      ...(payload.data || {}),
+      ...(resolvedUrl ? { url: resolvedUrl } : {}),
+    };
 
     const canonicalInsert = await supabase
       .from('notification_table')
@@ -227,8 +281,11 @@ export async function createNotification(payload: NotificationPayload): Promise<
         sent_to: payload.user_id,
         sent_by: payload.sent_by ?? null,
         type: payload.type,
-        data: payload.data || {},
+        data: notificationData,
         is_read: false,
+        ...(payload.global_announcement_id
+          ? { global_announcement_id: payload.global_announcement_id }
+          : {}),
         ...(imageId ? { image_id: imageId } : {}),
       })
       .select('notification_id')
@@ -256,7 +313,7 @@ export async function createNotification(payload: NotificationPayload): Promise<
           body: payload.body,
           description: payload.description,
           type: payload.type,
-          data: payload.data || {},
+          data: notificationData,
           is_read: false,
           ...(payload.image_url ? { image_url: payload.image_url } : {}),
         })
@@ -271,15 +328,13 @@ export async function createNotification(payload: NotificationPayload): Promise<
       notificationId = legacyInsert.data?.notification_id ?? null;
     }
 
-    // Get user's notification token and send push
-    const { data: userData } = await supabase
-      .from('user_table')
-      .select('notification_token')
-      .eq('user_id', payload.user_id)
-      .single();
-
-    if (userData?.notification_token) {
-      await sendPushNotification(userData.notification_token, payload);
+    if (!payload.skip_push) {
+      if (userData?.notification_token) {
+        await sendPushNotification(userData.notification_token, {
+          ...payload,
+          data: notificationData,
+        });
+      }
     }
 
     return notificationId;
@@ -337,18 +392,41 @@ export async function sendGlobalAnnouncement(
       return false;
     }
 
-    // Get all users with notification tokens
+    const announcementId = announcement.id as number | undefined;
+    if (!announcementId) {
+      logger.error({ announcement }, 'Announcement insert did not return an ID');
+      return false;
+    }
+
+    // Create in-app notifications for every user so announcements appear in the portal.
     const { data: users, error: usersError } = await supabase
       .from('user_table')
-      .select('user_id, notification_token')
-      .not('notification_token', 'is', null);
+      .select('user_id, notification_token, user_type')
+      .not('user_id', 'is', null);
 
     if (usersError) {
       logger.error({ error: usersError }, 'Failed to fetch users for announcement');
       return false;
     }
 
-    // Send to all users
+    const createNotificationPromises = (users || []).map((user) =>
+      createNotification({
+        user_id: user.user_id,
+        title: 'Announcement',
+        body: message,
+        description,
+        type: 'global_announcement',
+        image_url: imageUrl,
+        image_id: imageId,
+        sent_by: senderId,
+        global_announcement_id: announcementId,
+        data: { announcement_id: announcementId },
+        skip_push: true,
+      })
+    );
+
+    await Promise.allSettled(createNotificationPromises);
+
     const sendPromises = (users || [])
       .filter((u) => u.notification_token)
       .map((user) =>
@@ -357,15 +435,20 @@ export async function sendGlobalAnnouncement(
           title: 'Announcement',
           body: message,
           description,
-          type: 'announcement',
+          type: 'global_announcement',
           image_url: imageUrl,
-          data: { announcement_id: announcement.global_notification_id },
+          data: {
+            announcement_id: announcementId,
+            ...(isNotificationRecipientRole(user.user_type)
+              ? { url: getNotificationsPathForRole(user.user_type) }
+              : {}),
+          },
         })
       );
 
     await Promise.allSettled(sendPromises);
     logger.info({
-      announcementId: announcement.global_notification_id,
+      announcementId,
       recipientCount: users?.length || 0,
     }, 'Global announcement sent');
 

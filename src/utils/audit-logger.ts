@@ -1,4 +1,5 @@
 import { getSupabaseClient } from '../services/supabase.js';
+import { AUDIT_TIMEOUT_MS, withTimeout } from './timeout.js';
 import logger from './logger.js';
 
 export interface AuditLogParams {
@@ -19,13 +20,18 @@ export async function logAudit(params: AuditLogParams): Promise<void> {
   try {
     const supabase = getSupabaseClient();
 
-    const { error } = await supabase.rpc('insert_audit_log', {
-      p_user_id: userId,
-      p_action_type: actionType,
-      p_target_entity_type: tableName,
-      p_target_entity_id: recordId,
-      p_details: details,
-    });
+    const { error } = await withTimeout(Promise.resolve(
+      supabase.rpc('insert_audit_log', {
+        p_user_id: userId,
+        p_action_type: actionType,
+        p_target_entity_type: tableName,
+        p_target_entity_id: recordId,
+        p_details: details,
+      })
+    ),
+      AUDIT_TIMEOUT_MS,
+      'Audit log insertion'
+    );
 
     if (error) {
       logger.error({ error, userId, actionType }, 'Failed to insert audit log');
@@ -55,7 +61,7 @@ export async function getUserName(userId: string): Promise<string> {
     }
 
     return data.user_name || 'Staff';
-  } catch (error) {
+  } catch {
     return 'Staff';
   }
 }

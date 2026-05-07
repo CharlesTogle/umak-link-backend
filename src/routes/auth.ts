@@ -7,7 +7,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { AuthLoginRequest, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
 import { getPhilippineNowIso } from '../utils/time.js';
-import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
+import { GENERAL_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 const JWT_SECRET: string = (() => {
   const secret = process.env.JWT_SECRET;
@@ -21,9 +21,15 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin'];
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+const LOGIN_TIMEOUT_MESSAGE =
+  'Request timed out. Please check your internet connection and try again.';
 
 function isAllowedUserType(value: unknown): value is UserType {
   return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes('timed out');
 }
 
 /**
@@ -50,7 +56,7 @@ async function uploadProfilePicture(
   try {
     const response = await withTimeout(
       fetch(imageUrl),
-      DEFAULT_TIMEOUT_MS,
+      GENERAL_TIMEOUT_MS,
       'Fetch Google profile image'
     );
     if (!response.ok) {
@@ -121,7 +127,7 @@ export default async function authRoutes(server: FastifyInstance) {
             idToken: googleIdToken,
             audience: GOOGLE_CLIENT_ID,
           }),
-          DEFAULT_TIMEOUT_MS,
+          GENERAL_TIMEOUT_MS,
           'Google token verification'
         );
 
@@ -144,7 +150,7 @@ export default async function authRoutes(server: FastifyInstance) {
         if (!normalizedEmail.endsWith(`@${allowedDomain}`)) {
           return reply.status(403).send({
             error: 'Access Denied',
-            message: 'Please use your organization email to sign in',
+            message: 'Sign in failed. Please make sure to use your UMAK Google Account and try again',
           });
         }
 
@@ -219,7 +225,17 @@ export default async function authRoutes(server: FastifyInstance) {
         });
       } catch (error) {
         logger.error({ error }, 'Google auth error');
-        return reply.status(401).send({ error: 'Authentication failed', message: String(error) });
+        if (isTimeoutError(error)) {
+          return reply.status(408).send({
+            error: 'Authentication timed out',
+            message: LOGIN_TIMEOUT_MESSAGE,
+          });
+        }
+
+        return reply.status(401).send({
+          error: 'Authentication failed',
+          message: 'Unable to complete sign in. Please try again.',
+        });
       }
     }
   );
@@ -410,7 +426,7 @@ export default async function authRoutes(server: FastifyInstance) {
             idToken: googleIdToken,
             audience: GOOGLE_CLIENT_ID,
           }),
-          DEFAULT_TIMEOUT_MS,
+          GENERAL_TIMEOUT_MS,
           'Google token verification'
         );
 

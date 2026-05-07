@@ -4,6 +4,7 @@ import { requireAdmin, requireStaff } from '../middleware/auth.js';
 import { DashboardStats } from '../types/search.js';
 import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
+import { AUDIT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 export default async function adminRoutes(server: FastifyInstance) {
   // GET /admin/users - List users with filters
@@ -81,26 +82,93 @@ export default async function adminRoutes(server: FastifyInstance) {
     },
     async (request) => {
       const supabase = getSupabaseClient();
+      const actorId = request.user?.user_id;
       const userId = request.params.id;
       const { role, previous_role } = request.body;
 
+      if (!actorId) {
+        throw new Error('Unauthorized');
+      }
+
+      const { data: existingUser, error: existingUserError } = await supabase
+        .from('user_table')
+        .select('user_id, user_name, email, user_type')
+        .eq('user_id', userId)
+        .single();
+
+      if (existingUserError || !existingUser) {
+        logger.error({ error: existingUserError, userId }, 'Failed to load user before role update');
+        throw new Error('Failed to update user role');
+      }
+
+      if (previous_role && existingUser.user_type !== previous_role) {
+        logger.warn(
+          { userId, expectedRole: previous_role, actualRole: existingUser.user_type },
+          'Role update rejected because the target role changed before submission'
+        );
+        throw new Error('User role changed before the update could be applied. Please refresh and try again.');
+      }
+
+      if (existingUser.user_type === role) {
+        return { success: true };
+      }
+
       // Build the update query
-      let query = supabase.from('user_table').update({ user_type: role }).eq('user_id', userId);
+      let query = supabase
+        .from('user_table')
+        .update({ user_type: role })
+        .eq('user_id', userId);
 
       // If previous_role is 'User', ensure we only promote regular users
       if (previous_role === 'User') {
         query = query.eq('user_type', 'User');
       }
 
-      const { error } = await query;
+      const { data: updatedUser, error } = await query
+        .select('user_id, user_name, email, user_type')
+        .single();
 
-      if (error) {
+      if (error || !updatedUser) {
         logger.error({ error, userId, role }, 'Failed to update user role');
         throw new Error('Failed to update user role');
       }
 
+      const auditDetails = {
+        message: `Updated ${existingUser.user_name || 'user'} role from ${existingUser.user_type} to ${role}`,
+        target_user_id: existingUser.user_id,
+        target_user_email: existingUser.email,
+        old_role: existingUser.user_type,
+        new_role: role,
+      };
+
+      const { error: auditError } = await withTimeout(Promise.resolve(
+        supabase.rpc('insert_audit_log', {
+          p_user_id: actorId,
+          p_action_type: 'role_updated',
+          p_target_entity_type: 'user_table',
+          p_target_entity_id: userId,
+          p_details: auditDetails,
+        })
+      ),
+        AUDIT_TIMEOUT_MS,
+        'Insert role audit log'
+      );
+
+      if (auditError) {
+        const { error: rollbackError } = await supabase
+          .from('user_table')
+          .update({ user_type: existingUser.user_type })
+          .eq('user_id', userId);
+
+        logger.error(
+          { auditError, rollbackError, actorId, userId, role },
+          'Failed to write role audit log after updating role'
+        );
+        throw new Error('Failed to update user role');
+      }
+
       logger.info({ userId, role }, 'User role updated');
-      return { success: true };
+      return { success: true, user: updatedUser };
     }
   );
 
@@ -149,7 +217,7 @@ export default async function adminRoutes(server: FastifyInstance) {
   // POST /audit-logs - Insert audit log
   server.post<{
     Body: {
-      user_id: string;
+      user_id?: string;
       action: string;
       table_name: string;
       record_id: string;
@@ -162,7 +230,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       schema: {
         body: {
           type: 'object',
-          required: ['user_id', 'action', 'table_name', 'record_id', 'changes'],
+          required: ['action', 'table_name', 'record_id', 'changes'],
           properties: {
             user_id: { type: 'string', minLength: 1 },
             action: { type: 'string', minLength: 1 },
@@ -176,10 +244,15 @@ export default async function adminRoutes(server: FastifyInstance) {
     },
     async (request) => {
       const supabase = getSupabaseClient();
-      const { user_id, action, table_name, record_id, changes } = request.body;
+      const { action, table_name, record_id, changes } = request.body;
+      const userId = request.user?.user_id;
+
+      if (!userId) {
+        throw new Error('Unauthorized');
+      }
 
       const { data, error } = await supabase.rpc('insert_audit_log', {
-        p_user_id: user_id,
+        p_user_id: userId,
         p_action_type: action,
         p_target_entity_type: table_name,
         p_target_entity_id: record_id,

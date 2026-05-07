@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import logger from '../utils/logger.js';
-import { DEFAULT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
+import { GENERAL_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 const CREATE_POST_CATEGORIES = [
   'Electronics',
@@ -20,54 +20,46 @@ const CREATE_POST_CATEGORIES = [
   'Other',
 ] as const;
 
-interface RateLimiter {
-  tokens: number;
-  lastRefill: number;
-  maxTokens: number;
-  refillRate: number;
-}
+const GEMINI_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+const GEMINI_RATE_LIMIT_MAX_REQUESTS = 10;
 
 class GeminiService {
   private client: GoogleGenerativeAI | null = null;
   private model: GenerativeModel | null = null;
-  private rateLimiter: RateLimiter = {
-    tokens: 10,
-    lastRefill: Date.now(),
-    maxTokens: 10,
-    refillRate: 60000, // 1 token per minute
-  };
+  private requestTimestamps: number[] = [];
   private retryQueue: Array<{ item: ItemData; retryCount: number }> = [];
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
       this.client = new GoogleGenerativeAI(apiKey);
-      this.model = this.client.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      this.model = this.client.getGenerativeModel({ model: 'gemini-2.0-flash' });
       logger.info('Gemini service initialized');
     } else {
       logger.warn('GEMINI_API_KEY not configured - AI features disabled');
     }
   }
 
-  private refillTokens(): void {
-    const now = Date.now();
-    const elapsed = now - this.rateLimiter.lastRefill;
-    const tokensToAdd = Math.floor(elapsed / this.rateLimiter.refillRate);
-
-    if (tokensToAdd > 0) {
-      this.rateLimiter.tokens = Math.min(
-        this.rateLimiter.maxTokens,
-        this.rateLimiter.tokens + tokensToAdd
-      );
-      this.rateLimiter.lastRefill = now;
-    }
+  private pruneRequestTimestamps(now: number): void {
+    this.requestTimestamps = this.requestTimestamps.filter(
+      (timestamp) => now - timestamp < GEMINI_RATE_LIMIT_WINDOW_MS
+    );
   }
 
-  private async acquireToken(): Promise<boolean> {
-    this.refillTokens();
+  private canStartRequest(now: number): boolean {
+    this.pruneRequestTimestamps(now);
+    return this.requestTimestamps.length < GEMINI_RATE_LIMIT_MAX_REQUESTS;
+  }
 
-    if (this.rateLimiter.tokens > 0) {
-      this.rateLimiter.tokens--;
+  private recordRequest(now: number): void {
+    this.requestTimestamps.push(now);
+    this.pruneRequestTimestamps(now);
+  }
+
+  private async acquireRequestSlot(): Promise<boolean> {
+    const now = Date.now();
+    if (this.canStartRequest(now)) {
+      this.recordRequest(now);
       return true;
     }
 
@@ -79,7 +71,7 @@ class GeminiService {
       throw new Error('Gemini service not configured');
     }
 
-    const canProceed = await this.acquireToken();
+    const canProceed = await this.acquireRequestSlot();
     if (!canProceed) {
       throw new RateLimitError('Rate limit exceeded');
     }
@@ -88,7 +80,7 @@ class GeminiService {
       const prompt = this.buildPrompt(item);
       const result = await withTimeout(
         this.model.generateContent(prompt),
-        DEFAULT_TIMEOUT_MS,
+        GENERAL_TIMEOUT_MS,
         'Gemini generateContent'
       );
       const response = result.response;
@@ -111,7 +103,7 @@ class GeminiService {
       throw new Error('Gemini service not configured');
     }
 
-    const canProceed = await this.acquireToken();
+    const canProceed = await this.acquireRequestSlot();
     if (!canProceed) {
       throw new RateLimitError('Rate limit exceeded');
     }
@@ -135,7 +127,7 @@ class GeminiService {
             },
           },
         ]),
-        DEFAULT_TIMEOUT_MS,
+        GENERAL_TIMEOUT_MS,
         'Gemini create-post autofill'
       );
     } catch (error: unknown) {
@@ -165,7 +157,7 @@ class GeminiService {
       throw new Error('Gemini service not configured');
     }
 
-    const canProceed = await this.acquireToken();
+    const canProceed = await this.acquireRequestSlot();
     if (!canProceed) {
       throw new RateLimitError('Rate limit exceeded');
     }
@@ -188,7 +180,7 @@ Generate a search query string using only objective attributes.
           },
         },
       ]),
-      DEFAULT_TIMEOUT_MS,
+      GENERAL_TIMEOUT_MS,
       'Gemini reverse-image search'
     );
 

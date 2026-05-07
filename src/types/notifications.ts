@@ -24,7 +24,6 @@ export interface NotificationRecord {
 }
 
 export interface SendGlobalAnnouncementRequest {
-  user_id: string;
   message: string;
   description?: string | null;
   image_url?: string | null;

@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../services/supabase.js';
 import { sendGlobalAnnouncement } from '../services/notifications.js';
-import { requireAuth, requireStaff } from '../middleware/auth.js';
+import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { SendGlobalAnnouncementRequest, AnnouncementRecord } from '../types/notifications.js';
 import logger from '../utils/logger.js';
 
@@ -10,13 +10,12 @@ export default async function announcementsRoutes(server: FastifyInstance) {
   server.post<{ Body: SendGlobalAnnouncementRequest }>(
     '/send',
     {
-      preHandler: [requireStaff],
+      preHandler: [requireAdmin],
       schema: {
         body: {
           type: 'object',
-          required: ['user_id', 'message'],
+          required: ['message'],
           properties: {
-            user_id: { type: 'string', minLength: 1 },
             message: { type: 'string', minLength: 1 },
             description: { type: ['string', 'null'] },
             image_url: { type: ['string', 'null'] },
@@ -26,15 +25,25 @@ export default async function announcementsRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const { user_id, message, description, image_url } = request.body;
+      const { message, description, image_url } = request.body;
+      const senderId = request.user?.user_id;
 
-      const success = await sendGlobalAnnouncement(message, description || null, image_url || null, user_id);
+      if (!senderId) {
+        throw new Error('Unauthorized');
+      }
+
+      const success = await sendGlobalAnnouncement(
+        message,
+        description || null,
+        image_url || null,
+        senderId
+      );
 
       if (!success) {
         throw new Error('Failed to send announcement');
       }
 
-      logger.info({ senderId: user_id }, 'Global announcement sent');
+      logger.info({ senderId }, 'Global announcement sent');
       return { success: true };
     }
   );

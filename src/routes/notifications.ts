@@ -24,6 +24,12 @@ function normalizeNotificationId(value: string): string | number {
   return value;
 }
 
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
 export default async function notificationsRoutes(server: FastifyInstance) {
   // POST /notifications/send - Create and send notification
   server.post<{ Body: SendNotificationRequest }>(
@@ -120,7 +126,10 @@ export default async function notificationsRoutes(server: FastifyInstance) {
         description: (row.description as string | null) ?? null,
         sent_to: (row.sent_to as string | null) ?? (row.user_id as string | null) ?? null,
         sent_by: (row.sent_by as string | null) ?? null,
-        type: String(row.type ?? 'info'),
+        type:
+          String(row.type ?? 'info') === 'announcement'
+            ? 'global_announcement'
+            : String(row.type ?? 'info'),
         data: (row.data as Record<string, unknown> | null) ?? null,
         is_read: Boolean(row.is_read),
         created_at: String(row.created_at ?? ''),
@@ -173,15 +182,33 @@ export default async function notificationsRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const notificationId = normalizeNotificationId(request.params.id);
+      const userId = request.user?.user_id;
 
-      const { error } = await supabase
+      let updateQuery = await supabase
         .from('notification_table')
         .update({ is_read: true })
-        .eq('notification_id', notificationId);
+        .eq('notification_id', notificationId)
+        .eq('sent_to', userId)
+        .select('notification_id')
+        .maybeSingle();
 
-      if (error) {
-        logger.error({ error, notificationId }, 'Failed to mark notification as read');
+      if (updateQuery.error && isMissingColumnError(updateQuery.error, 'sent_to')) {
+        updateQuery = await supabase
+          .from('notification_table')
+          .update({ is_read: true })
+          .eq('notification_id', notificationId)
+          .eq('user_id', userId)
+          .select('notification_id')
+          .maybeSingle();
+      }
+
+      if (updateQuery.error) {
+        logger.error({ error: updateQuery.error, notificationId, userId }, 'Failed to mark notification as read');
         throw new Error('Failed to update notification');
+      }
+
+      if (!updateQuery.data) {
+        throw createHttpError('Notification not found', 404);
       }
 
       return { success: true };
@@ -197,15 +224,33 @@ export default async function notificationsRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const notificationId = normalizeNotificationId(request.params.id);
+      const userId = request.user?.user_id;
 
-      const { error } = await supabase
+      let deleteQuery = await supabase
         .from('notification_table')
         .delete()
-        .eq('notification_id', notificationId);
+        .eq('notification_id', notificationId)
+        .eq('sent_to', userId)
+        .select('notification_id')
+        .maybeSingle();
 
-      if (error) {
-        logger.error({ error, notificationId }, 'Failed to delete notification');
+      if (deleteQuery.error && isMissingColumnError(deleteQuery.error, 'sent_to')) {
+        deleteQuery = await supabase
+          .from('notification_table')
+          .delete()
+          .eq('notification_id', notificationId)
+          .eq('user_id', userId)
+          .select('notification_id')
+          .maybeSingle();
+      }
+
+      if (deleteQuery.error) {
+        logger.error({ error: deleteQuery.error, notificationId, userId }, 'Failed to delete notification');
         throw new Error('Failed to delete notification');
+      }
+
+      if (!deleteQuery.data) {
+        throw createHttpError('Notification not found', 404);
       }
 
       return { success: true };

@@ -4,6 +4,16 @@ import { requireAuth } from '../../middleware/auth.js';
 import { EditPostRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
 
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+function buildPlaceholderImageHash(params: { posterId: string; itemType: string; itemName: string }) {
+  return `no-image:${params.posterId}:${params.itemType}:${params.itemName.trim().toLowerCase()}`;
+}
+
 export default async function postsImageRoutes(server: FastifyInstance) {
   // PUT /posts/:id/edit-with-image - Edit post with image replacement
   server.put<{
@@ -61,17 +71,32 @@ export default async function postsImageRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const postId = parseInt(request.params.id, 10);
       const body = request.body;
+      const userId = request.user?.user_id;
+
+      if (!userId) {
+        throw createHttpError('Unauthorized', 401);
+      }
 
       // First, get the old image link to delete later
       const { data: postRecord, error: fetchError } = await supabase
-        .from('post_table')
-        .select('item_id')
+        .from('post_public_view')
+        .select('poster_id, post_status, item_id, item_name, item_type')
         .eq('post_id', postId)
         .single();
 
       if (fetchError || !postRecord) {
         logger.error({ error: fetchError, postId }, 'Failed to fetch post for edit');
-        throw new Error('Post not found');
+        throw createHttpError('Post not found', 404);
+      }
+
+      if (request.user?.user_type === 'User') {
+        if (postRecord.poster_id !== userId) {
+          throw createHttpError('Unauthorized', 403);
+        }
+
+        if (postRecord.post_status !== 'pending') {
+          throw createHttpError('Users can only edit pending posts', 403);
+        }
       }
 
       const { data: itemRecord, error: itemError } = await supabase
@@ -91,13 +116,22 @@ export default async function postsImageRoutes(server: FastifyInstance) {
         .eq('item_image_id', itemRecord.image_id)
         .single();
 
+      const imageHash =
+        typeof body.p_image_hash === 'string' && body.p_image_hash.trim().length > 0
+          ? body.p_image_hash
+          : buildPlaceholderImageHash({
+              posterId: userId,
+              itemType: body.p_item_type ?? postRecord.item_type ?? 'found',
+              itemName: body.p_item_name ?? postRecord.item_name ?? `post-${postId}`,
+            });
+
       // Call the RPC to edit the post
       const { data, error } = await supabase.rpc('edit_post_with_item_date_time_location', {
         p_post_id: postId,
         p_item_name: body.p_item_name,
         p_item_description: body.p_item_description,
         p_item_type: body.p_item_type,
-        p_image_hash: body.p_image_hash,
+        p_image_hash: imageHash,
         p_image_link: body.p_image_link,
         p_last_seen_date: body.p_last_seen_date,
         p_last_seen_hours: body.p_last_seen_hours,

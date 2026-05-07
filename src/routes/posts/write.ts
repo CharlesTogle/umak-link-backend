@@ -5,6 +5,55 @@ import { CreatePostRequest, EditPostRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
 import { logAudit, getUserName } from '../../utils/audit-logger.js';
 
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+function buildPlaceholderImageHash(params: { posterId: string; itemType: string; itemName: string }) {
+  return `no-image:${params.posterId}:${params.itemType}:${params.itemName.trim().toLowerCase()}`;
+}
+
+async function getPostAccessRecord(supabase: ReturnType<typeof getSupabaseClient>, postId: number) {
+  const { data, error } = await supabase
+    .from('post_public_view')
+    .select('poster_id, post_status, item_status, item_id, item_name, poster_name')
+    .eq('post_id', postId)
+    .single();
+
+  if (error || !data) {
+    logger.error({ error, postId }, 'Failed to fetch post access record');
+    throw createHttpError('Post not found', 404);
+  }
+
+  return data;
+}
+
+function assertUserOwnsPost(post: { poster_id: string | null }, userId: string) {
+  if (post.poster_id !== userId) {
+    throw createHttpError('Unauthorized', 403);
+  }
+}
+
+function assertUserCanEditPost(post: { post_status: string | null }) {
+  if (post.post_status !== 'pending') {
+    throw createHttpError('Users can only edit pending posts', 403);
+  }
+}
+
+function assertUserCanDeletePost(post: { post_status: string | null; item_status: string | null }) {
+  const canDelete =
+    post.item_status === 'unclaimed' ||
+    post.item_status === 'lost' ||
+    post.post_status === 'pending' ||
+    post.post_status === 'rejected';
+
+  if (!canDelete || post.post_status === 'accepted') {
+    throw createHttpError('Users can only delete pending or rejected posts with unclaimed or lost items', 403);
+  }
+}
+
 export default async function postsWriteRoutes(server: FastifyInstance) {
   // POST /posts - Create new post
   server.post<{ Body: CreatePostRequest }>(
@@ -14,13 +63,13 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       schema: {
         body: {
           type: 'object',
-          required: ['p_item_name', 'p_item_type', 'p_image_hash', 'p_location_path'],
+          required: ['p_item_name', 'p_item_type', 'p_location_path'],
           properties: {
             p_item_name: { type: 'string', minLength: 1 },
             p_item_description: { type: 'string' },
             p_item_type: { type: 'string', enum: ['found', 'lost', 'missing'] },
             p_poster_id: { type: 'string' },
-            p_image_hash: { type: 'string', minLength: 1 },
+            p_image_hash: { type: ['string', 'null'] },
             p_category: { type: 'string' },
             p_date_day: { type: 'number' },
             p_date_month: { type: 'number' },
@@ -51,15 +100,24 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       const posterId = request.user?.user_id;
 
       if (!posterId) {
-        throw new Error('Unauthorized');
+        throw createHttpError('Unauthorized', 401);
       }
+
+      const imageHash =
+        typeof body.p_image_hash === 'string' && body.p_image_hash.trim().length > 0
+          ? body.p_image_hash
+          : buildPlaceholderImageHash({
+              posterId,
+              itemType: body.p_item_type,
+              itemName: body.p_item_name,
+            });
 
       const { data, error } = await supabase.rpc('create_post_with_item_date_time_location', {
         p_item_name: body.p_item_name,
         p_item_description: body.p_item_description,
         p_item_type: body.p_item_type,
         p_poster_id: posterId,
-        p_image_hash: body.p_image_hash,
+        p_image_hash: imageHash,
         p_category: body.p_category,
         p_date_day: body.p_date_day,
         p_date_month: body.p_date_month,
@@ -129,24 +187,13 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       const userId = request.user?.user_id;
 
       if (!userId) {
-        throw new Error('Unauthorized');
+        throw createHttpError('Unauthorized', 401);
       }
 
       if (request.user?.user_type === 'User') {
-        const { data: postOwner, error: ownerError } = await supabase
-          .from('post_table')
-          .select('poster_id')
-          .eq('post_id', postId)
-          .single();
-
-        if (ownerError || !postOwner) {
-          logger.error({ error: ownerError, postId }, 'Failed to fetch post owner');
-          throw new Error('Post not found');
-        }
-
-        if (postOwner.poster_id !== userId) {
-          throw new Error('Unauthorized');
-        }
+        const postRecord = await getPostAccessRecord(supabase, postId);
+        assertUserOwnsPost(postRecord, userId);
+        assertUserCanEditPost(postRecord);
       }
 
       const { data, error } = await supabase.rpc('edit_post_with_item_date_time_location', {
@@ -194,12 +241,19 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       const postId = parseInt(request.params.id, 10);
       const userId = request.user?.user_id;
 
+      if (!userId) {
+        throw createHttpError('Unauthorized', 401);
+      }
+
+      const postRecord = await getPostAccessRecord(supabase, postId);
+
+      if (request.user?.user_type === 'User') {
+        assertUserOwnsPost(postRecord, userId);
+        assertUserCanDeletePost(postRecord);
+      }
+
       // Get post details before deletion for audit log
-      const { data: postData } = await supabase
-        .from('post_public_view')
-        .select('item_name, poster_name')
-        .eq('post_id', postId)
-        .single();
+      const postData = postRecord;
 
       const { error } = await supabase.rpc('delete_post_by_id', {
         p_post_id: postId,

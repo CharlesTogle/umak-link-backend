@@ -2,6 +2,7 @@ export interface ClaimDetails {
   claimer_name: string;
   claimer_school_email: string;
   claimer_contact_num: string;
+  claimed_at?: string | null;
   poster_name: string;
   staff_id: string;
   staff_name: string;

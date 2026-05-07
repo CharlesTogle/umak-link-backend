@@ -5,17 +5,75 @@ import {
   FraudReportCreateRequest,
   FraudReportListResponse,
   FraudReportResolveRequest,
+  FraudReportStatus,
 } from '../types/fraud-reports.js';
+import { sendEmail } from '../services/email.js';
 import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
+
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+function buildFraudReportOpenedEmail(params: {
+  claimerName: string;
+  postTitle: string;
+  reporterName: string;
+  staffName: string;
+}) {
+  const acceptedDate = new Date().toLocaleString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Asia/Manila',
+  });
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Item Claim Report - Action Required</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;background:#ffffff;">
+    <div style="background:#1e2b87;color:#ffffff;padding:30px 20px;text-align:center;">
+      <h1 style="margin:0;font-size:24px;">Item Claim Report - Action Required</h1>
+    </div>
+    <div style="padding:32px 28px;color:#333333;line-height:1.6;">
+      <h2 style="color:#1e2b87;margin-top:0;">Dear ${params.claimerName},</h2>
+      <p>An item you claimed through UMak LINK has been reported as a potentially fraudulent claim.</p>
+      <div style="background:#f8f9fa;border-left:4px solid #1e2b87;padding:16px 20px;margin:20px 0;">
+        <p style="margin:6px 0;"><strong>Claimed Item:</strong> ${params.postTitle}</p>
+        <p style="margin:6px 0;"><strong>Reported By:</strong> ${params.reporterName}</p>
+        <p style="margin:6px 0;"><strong>Reviewed By:</strong> ${params.staffName}</p>
+        <p style="margin:6px 0;"><strong>Date Reviewed:</strong> ${acceptedDate}</p>
+      </div>
+      <div style="background:#f8d7da;border-left:4px solid #dc3545;padding:16px 20px;margin:20px 0;">
+        <strong>Immediate action required.</strong>
+        <p style="margin:10px 0 0;">Please report to the UMak Security Office within one week and bring proof of ownership for the claimed item.</p>
+      </div>
+      <p>Failure to appear may result in the case being escalated for further disciplinary action.</p>
+      <p style="margin-top:28px;">UMak Security Office<br />University of Makati</p>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
+}
 
 export default async function fraudReportsRoutes(server: FastifyInstance) {
   // GET /fraud-reports/check-duplicates - Check for duplicate reports
   server.get<{
     Querystring: {
       post_id: string;
-      user_id: string;
+      user_id?: string;
       concern?: string;
     };
   }>(
@@ -25,7 +83,12 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
     },
     async (request) => {
       const supabase = getSupabaseClient();
-      const { post_id, user_id, concern } = request.query;
+      const { post_id, concern } = request.query;
+      const reporterId = request.user?.user_id;
+
+      if (!reporterId) {
+        throw createHttpError('Unauthorized', 401);
+      }
 
       const postIdNum = parseInt(post_id, 10);
 
@@ -34,7 +97,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         .from('fraud_reports_table')
         .select('report_id', { count: 'exact', head: true })
         .eq('post_id', postIdNum)
-        .eq('reported_by', user_id);
+        .eq('reported_by', reporterId);
 
       if (concern) {
         selfQuery = selfQuery.eq('reason_for_reporting', concern);
@@ -43,7 +106,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const { count: selfCount, error: selfError } = await selfQuery;
 
       if (selfError) {
-        logger.error({ error: selfError, post_id, user_id }, 'Failed to check self duplicates');
+        logger.error({ error: selfError, post_id, reporterId }, 'Failed to check self duplicates');
         throw new Error('Failed to check duplicates');
       }
 
@@ -52,7 +115,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         .from('fraud_reports_table')
         .select('report_id', { count: 'exact', head: true })
         .eq('post_id', postIdNum)
-        .neq('reported_by', user_id);
+        .neq('reported_by', reporterId);
 
       if (concern) {
         othersQuery = othersQuery.eq('reason_for_reporting', concern);
@@ -61,7 +124,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const { count: othersCount, error: othersError } = await othersQuery;
 
       if (othersError) {
-        logger.error({ error: othersError, post_id, user_id }, 'Failed to check others duplicates');
+        logger.error({ error: othersError, post_id, reporterId }, 'Failed to check others duplicates');
         throw new Error('Failed to check duplicates');
       }
 
@@ -103,7 +166,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const reporterId = request.user?.user_id;
 
       if (!reporterId) {
-        throw new Error('Unauthorized');
+        throw createHttpError('Unauthorized', 401);
       }
 
       const { data, error } = await supabase.rpc('create_or_get_fraud_report', {
@@ -147,7 +210,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       if (error || !report) {
         logger.error({ error, reportId }, 'Failed to fetch fraud report');
-        throw new Error('Fraud report not found');
+        throw createHttpError('Fraud report not found', 404);
       }
 
       return report;
@@ -224,7 +287,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       if (error || !data) {
         logger.error({ error, reportId }, 'Failed to fetch fraud report status');
-        throw new Error('Fraud report not found');
+        throw createHttpError('Fraud report not found', 404);
       }
 
       return { report_status: data.report_status };
@@ -235,30 +298,64 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
   server.put<{
     Params: { id: string };
     Body: {
-      status: string;
+      status: FraudReportStatus;
       processed_by_staff_id?: string;
     };
   }>(
     '/:id/status',
     {
       preHandler: [requireStaff],
+      schema: {
+        body: {
+          type: 'object',
+          required: ['status'],
+          properties: {
+            status: {
+              type: 'string',
+              enum: ['under_review', 'verified', 'rejected', 'resolved', 'open'],
+            },
+            processed_by_staff_id: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request) => {
       const supabase = getSupabaseClient();
       const reportId = request.params.id;
-      const { status, processed_by_staff_id } = request.body;
+      const { status } = request.body;
       const staffId = request.user?.user_id;
 
+      if (!staffId) {
+        throw createHttpError('Unauthorized', 401);
+      }
+
       // Get report details for audit log
-      const { data: reportData } = await supabase
+      const { data: reportData, error: reportError } = await supabase
         .from('fraud_reports_public_v')
-        .select('post_id, report_status')
+        .select('post_id, report_status, item_name, claimer_name, claimer_school_email, reporter_name, fraud_reviewer_id')
         .eq('report_id', reportId)
         .single();
 
-      const updateData: any = { report_status: status };
-      if (processed_by_staff_id) {
-        updateData.processed_by_staff_id = processed_by_staff_id;
+      if (reportError || !reportData) {
+        logger.error({ error: reportError, reportId }, 'Failed to fetch fraud report before status update');
+        throw createHttpError('Fraud report not found', 404);
+      }
+
+      if (status === 'open' && reportData.report_status !== 'under_review') {
+        throw createHttpError('Only reports under review can be opened', 400);
+      }
+
+      if (status === 'rejected' && reportData.report_status !== 'under_review') {
+        throw createHttpError('Only reports under review can be rejected', 400);
+      }
+
+      const updateData: { report_status: FraudReportStatus; processed_by_staff_id?: string } = {
+        report_status: status,
+      };
+
+      if (status === 'open' || status === 'rejected') {
+        updateData.processed_by_staff_id = staffId;
       }
 
       const { error } = await supabase
@@ -271,43 +368,75 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         throw new Error(error.message || 'Failed to update status');
       }
 
-      // Log to audit trail
-      if (staffId && reportData) {
-        const staffName = await getUserName(staffId);
+      if (status === 'rejected') {
+        const { error: restorePostError } = await supabase
+          .from('post_table')
+          .update({ status: 'accepted' })
+          .eq('post_id', reportData.post_id);
 
-        let actionType = '';
-        let message = '';
-
-        if (status === 'resolved') {
-          actionType = 'fraud_report_resolved';
-          message = `${staffName} resolved fraud report ${reportId}`;
-        } else if (status === 'rejected') {
-          actionType = 'fraud_report_rejected';
-          message = `${staffName} rejected fraud report ${reportId}`;
-        } else if (status === 'open' || status === 'under_review') {
-          actionType = 'fraud_report_marked_open';
-          message = `${staffName} marked fraud report ${reportId} as ${status}`;
-        } else {
-          actionType = 'fraud_report_status_changed';
-          message = `${staffName} changed fraud report status to ${status}`;
+        if (restorePostError) {
+          logger.error({ error: restorePostError, reportId }, 'Failed to restore post status after fraud report rejection');
+          throw new Error(restorePostError.message || 'Failed to restore post status');
         }
-
-        await logAudit({
-          userId: staffId,
-          actionType,
-          details: {
-            message,
-            report_id: reportId,
-            post_id: reportData.post_id?.toString(),
-            old_status: reportData.report_status,
-            new_status: status,
-            timestamp: new Date().toISOString(),
-          },
-          recordId: reportId,
-        });
       }
 
-      logger.info({ reportId, status, processed_by_staff_id }, 'Fraud report status updated');
+      if (status === 'open' && reportData.claimer_school_email && reportData.claimer_name) {
+        const staffName = await getUserName(staffId);
+        const emailResult = await sendEmail({
+          to: reportData.claimer_school_email,
+          subject: `URGENT: Claim Verification Required - ${reportData.item_name || 'Claimed Item'}`,
+          html: buildFraudReportOpenedEmail({
+            claimerName: reportData.claimer_name,
+            postTitle: reportData.item_name || 'Claimed Item',
+            reporterName: reportData.reporter_name || 'the reporter',
+            staffName,
+          }),
+          senderUuid: staffId,
+        });
+
+        if (!emailResult.success) {
+          logger.warn(
+            { reportId, staffId, to: reportData.claimer_school_email, error: emailResult.error },
+            'Failed to send fraud report opened email to claimer'
+          );
+        }
+      }
+
+      // Log to audit trail
+      const staffName = await getUserName(staffId);
+
+      let actionType = '';
+      let message = '';
+
+      if (status === 'resolved') {
+        actionType = 'fraud_report_resolved';
+        message = `${staffName} resolved fraud report ${reportId}`;
+      } else if (status === 'rejected') {
+        actionType = 'fraud_report_rejected';
+        message = `${staffName} rejected fraud report ${reportId}`;
+      } else if (status === 'open') {
+        actionType = 'fraud_report_marked_open';
+        message = `${staffName} marked fraud report ${reportId} as open`;
+      } else {
+        actionType = 'fraud_report_status_changed';
+        message = `${staffName} changed fraud report status to ${status}`;
+      }
+
+      await logAudit({
+        userId: staffId,
+        actionType,
+        details: {
+          message,
+          report_id: reportId,
+          post_id: reportData.post_id?.toString(),
+          old_status: reportData.report_status,
+          new_status: status,
+          timestamp: new Date().toISOString(),
+        },
+        recordId: reportId,
+      });
+
+      logger.info({ reportId, status, staffId }, 'Fraud report status updated');
       return { success: true };
     }
   );
@@ -324,16 +453,34 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const { delete_claim } = request.body;
       const staffId = request.user?.user_id;
 
+      if (!staffId) {
+        throw createHttpError('Unauthorized', 401);
+      }
+
       // Get report details for audit log
-      const { data: reportData } = await supabase
+      const { data: reportData, error: reportError } = await supabase
         .from('fraud_reports_public_v')
-        .select('post_id')
+        .select('post_id, report_status, fraud_reviewer_id')
         .eq('report_id', reportId)
         .single();
+
+      if (reportError || !reportData) {
+        logger.error({ error: reportError, reportId }, 'Failed to fetch fraud report before resolving');
+        throw createHttpError('Fraud report not found', 404);
+      }
+
+      if (reportData.report_status !== 'open') {
+        throw createHttpError('Only open fraud reports can be closed', 400);
+      }
+
+      if (reportData.fraud_reviewer_id !== staffId) {
+        throw createHttpError('Only the staff member who opened this report can close it', 403);
+      }
 
       const { data, error } = await supabase.rpc('resolve_fraud_report', {
         p_report_id: reportId,
         p_delete_claim: delete_claim || false,
+        p_processed_by_staff_id: staffId,
       });
 
       if (error) {
@@ -341,23 +488,25 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         throw new Error(error.message || 'Failed to resolve fraud report');
       }
 
-      // Log to audit trail
-      if (staffId) {
-        const staffName = await getUserName(staffId);
-
-        await logAudit({
-          userId: staffId,
-          actionType: 'fraud_report_resolved',
-          details: {
-            message: `${staffName} resolved fraud report ${reportId}${delete_claim ? ' and deleted the claim' : ''}`,
-            report_id: reportId,
-            post_id: reportData?.post_id?.toString(),
-            delete_claim: delete_claim || false,
-            resolved_at: new Date().toISOString(),
-          },
-          recordId: reportId,
-        });
+      if (Array.isArray(data) && data[0] && data[0].success === false) {
+        throw createHttpError(data[0].message || 'Failed to resolve fraud report', 400);
       }
+
+      // Log to audit trail
+      const staffName = await getUserName(staffId);
+
+      await logAudit({
+        userId: staffId,
+        actionType: 'fraud_report_resolved',
+        details: {
+          message: `${staffName} resolved fraud report ${reportId}${delete_claim ? ' and deleted the claim' : ''}`,
+          report_id: reportId,
+          post_id: reportData.post_id?.toString(),
+          delete_claim: delete_claim || false,
+          resolved_at: new Date().toISOString(),
+        },
+        recordId: reportId,
+      });
 
       logger.info({ reportId }, 'Fraud report resolved');
       return { success: true, data };
@@ -373,6 +522,26 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
     async (request) => {
       const supabase = getSupabaseClient();
       const reportId = request.params.id;
+      const staffId = request.user?.user_id;
+
+      if (!staffId) {
+        throw createHttpError('Unauthorized', 401);
+      }
+
+      const { data: reportData, error: reportError } = await supabase
+        .from('fraud_reports_public_v')
+        .select('post_id, report_status')
+        .eq('report_id', reportId)
+        .single();
+
+      if (reportError || !reportData) {
+        logger.error({ error: reportError, reportId }, 'Failed to fetch fraud report before deletion');
+        throw createHttpError('Fraud report not found', 404);
+      }
+
+      if (reportData.report_status !== 'rejected') {
+        throw createHttpError('Only rejected fraud reports can be deleted', 400);
+      }
 
       const { error } = await supabase
         .from('fraud_reports_table')
@@ -383,6 +552,20 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         logger.error({ error, reportId }, 'Failed to delete fraud report');
         throw new Error(error.message || 'Failed to delete fraud report');
       }
+
+      const staffName = await getUserName(staffId);
+
+      await logAudit({
+        userId: staffId,
+        actionType: 'fraud_report_deleted',
+        details: {
+          message: `${staffName} deleted fraud report ${reportId}`,
+          report_id: reportId,
+          post_id: reportData.post_id?.toString(),
+          deleted_at: new Date().toISOString(),
+        },
+        recordId: reportId,
+      });
 
       logger.info({ reportId }, 'Fraud report deleted');
       return { success: true };

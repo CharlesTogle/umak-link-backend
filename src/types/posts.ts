@@ -19,7 +19,7 @@ export interface CreatePostRequest {
   p_item_description?: string;
   p_item_type: ItemType;
   p_poster_id: string;
-  p_image_hash: string;
+  p_image_hash?: string | null;
   p_category?: string;
   p_date_day?: number;
   p_date_month?: number;

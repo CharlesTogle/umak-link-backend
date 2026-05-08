@@ -22,7 +22,7 @@ const CREATE_POST_CATEGORIES = [
 
 const GEMINI_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 const GEMINI_RATE_LIMIT_MAX_REQUESTS = 10;
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-lite';
 
 function normalizeGeminiModelName(modelName: string): string {
   return modelName.replace(/^models\//, '');

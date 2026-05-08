@@ -116,6 +116,66 @@ type SupabaseErrorLike = {
 
 type NotificationRecipientRole = 'User' | 'Staff' | 'Admin';
 
+function serializeNotificationDataValue(value: unknown): unknown {
+  if (value == null) return value;
+
+  if (Array.isArray(value)) {
+    return JSON.stringify(value.map((entry) => (entry == null ? '' : String(entry))));
+  }
+
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  return value;
+}
+
+function normalizeNotificationData(
+  data?: Record<string, unknown> | null
+): Record<string, unknown> | undefined {
+  if (!data) return undefined;
+
+  return Object.fromEntries(
+    Object.entries(data).map(([key, value]) => {
+      if (key === 'postId' || key === 'post_id') {
+        if (typeof value === 'string' || typeof value === 'number') {
+          return [key, String(value)];
+        }
+      }
+
+      if (key === 'matched_post_ids' || key === 'post_ids') {
+        if (typeof value === 'string') {
+          return [key, value];
+        }
+
+        return [key, serializeNotificationDataValue(value)];
+      }
+
+      return [key, serializeNotificationDataValue(value)];
+    })
+  );
+}
+
+function serializeFcmDataValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value == null) return '';
+
+  if (Array.isArray(value) || typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value);
+}
+
 function isMissingColumnError(error: unknown, column: string): boolean {
   const typed = error as SupabaseErrorLike | null;
   if (!typed) return false;
@@ -200,6 +260,8 @@ export async function sendPushNotification(
   }
 
   try {
+    const normalizedData = normalizeNotificationData(payload.data);
+    const resolvedUrl = getNotificationUrl(payload.type, normalizedData);
     const message: admin.messaging.Message = {
       token,
       notification: {
@@ -209,11 +271,14 @@ export async function sendPushNotification(
       },
       data: {
         type: payload.type,
-        ...(getNotificationUrl(payload.type, payload.data)
-          ? { url: getNotificationUrl(payload.type, payload.data)! }
+        ...(resolvedUrl
+          ? { url: resolvedUrl }
           : {}),
         ...Object.fromEntries(
-          Object.entries(payload.data || {}).map(([k, v]) => [k, String(v)])
+          Object.entries(normalizedData || {}).map(([key, value]) => [
+            key,
+            serializeFcmDataValue(value),
+          ])
         ),
       },
       android: {
@@ -265,9 +330,10 @@ export async function createNotification(payload: NotificationPayload): Promise<
     const recipientRole = isNotificationRecipientRole(userData?.user_type)
       ? userData.user_type
       : 'User';
-    const resolvedUrl = getNotificationUrl(payload.type, payload.data, recipientRole);
+    const normalizedData = normalizeNotificationData(payload.data);
+    const resolvedUrl = getNotificationUrl(payload.type, normalizedData, recipientRole);
     const notificationData = {
-      ...(payload.data || {}),
+      ...(normalizedData || {}),
       ...(resolvedUrl ? { url: resolvedUrl } : {}),
     };
 
@@ -409,7 +475,9 @@ export async function sendGlobalAnnouncement(
       return false;
     }
 
-    const createNotificationPromises = (users || []).map((user) =>
+    const recipientUsers = (users || []).filter((user) => user.user_id && user.user_id !== senderId);
+
+    const createNotificationPromises = recipientUsers.map((user) =>
       createNotification({
         user_id: user.user_id,
         title: 'Announcement',
@@ -427,7 +495,7 @@ export async function sendGlobalAnnouncement(
 
     await Promise.allSettled(createNotificationPromises);
 
-    const sendPromises = (users || [])
+    const sendPromises = recipientUsers
       .filter((u) => u.notification_token)
       .map((user) =>
         sendPushNotification(user.notification_token!, {
@@ -449,7 +517,8 @@ export async function sendGlobalAnnouncement(
     await Promise.allSettled(sendPromises);
     logger.info({
       announcementId,
-      recipientCount: users?.length || 0,
+      recipientCount: recipientUsers.length,
+      excludedSenderId: senderId,
     }, 'Global announcement sent');
 
     return true;

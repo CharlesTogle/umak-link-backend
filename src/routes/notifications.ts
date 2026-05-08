@@ -13,6 +13,14 @@ type SupabaseErrorLike = {
   hint?: string | null;
 };
 
+type UnreadNotificationRow = {
+  notification_id: string | number;
+  sent_to?: string | null;
+  user_id?: string | null;
+  sent_by?: string | null;
+  type?: string | null;
+};
+
 function isMissingColumnError(error: unknown, column: string): boolean {
   const typed = error as SupabaseErrorLike | null;
   if (!typed) return false;
@@ -28,6 +36,39 @@ function createHttpError(message: string, statusCode: number): Error & { statusC
   const error = new Error(message) as Error & { statusCode: number };
   error.statusCode = statusCode;
   return error;
+}
+
+function normalizeNotificationData(
+  data: Record<string, unknown> | null | undefined
+): Record<string, unknown> | null {
+  if (!data) return null;
+
+  return Object.fromEntries(
+    Object.entries(data).map(([key, value]) => {
+      if (key === 'postId' || key === 'post_id') {
+        if (typeof value === 'string' || typeof value === 'number') {
+          return [key, String(value)];
+        }
+      }
+
+      if ((key === 'matched_post_ids' || key === 'post_ids') && Array.isArray(value)) {
+        return [key, JSON.stringify(value.map((entry) => (entry == null ? '' : String(entry))))];
+      }
+
+      return [key, value];
+    })
+  );
+}
+
+function isSelfAuthoredAnnouncement(
+  notification: Pick<NotificationRecord, 'type' | 'sent_by' | 'user_id'>
+): boolean {
+  const type = notification.type === 'announcement' ? 'global_announcement' : notification.type;
+  return (
+    (type === 'announcement' || type === 'global_announcement') &&
+    Boolean(notification.sent_by) &&
+    notification.sent_by === notification.user_id
+  );
 }
 
 export default async function notificationsRoutes(server: FastifyInstance) {
@@ -130,13 +171,15 @@ export default async function notificationsRoutes(server: FastifyInstance) {
           String(row.type ?? 'info') === 'announcement'
             ? 'global_announcement'
             : String(row.type ?? 'info'),
-        data: (row.data as Record<string, unknown> | null) ?? null,
+        data: normalizeNotificationData((row.data as Record<string, unknown> | null) ?? null),
         is_read: Boolean(row.is_read),
         created_at: String(row.created_at ?? ''),
         image_url: (row.image_url as string | null) ?? null,
       }));
 
-      return { notifications };
+      return {
+        notifications: notifications.filter((notification) => !isSelfAuthoredAnnouncement(notification)),
+      };
     }
   );
 
@@ -150,26 +193,49 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       const supabase = getSupabaseClient();
       const userId = request.user?.user_id;
 
-      let countQuery = await supabase
+      const primaryUnreadQuery = await supabase
         .from('notification_table')
-        .select('*', { count: 'exact', head: true })
+        .select('notification_id, sent_to, user_id, sent_by, type')
         .eq('sent_to', userId)
         .eq('is_read', false);
 
-      if (countQuery.error && isMissingColumnError(countQuery.error, 'sent_to')) {
-        countQuery = await supabase
+      const unreadQuery =
+        primaryUnreadQuery.error && isMissingColumnError(primaryUnreadQuery.error, 'sent_to')
+          ? await supabase
           .from('notification_table')
-          .select('*', { count: 'exact', head: true })
+          .select('notification_id, user_id, sent_by, type')
           .eq('user_id', userId)
-          .eq('is_read', false);
-      }
+          .eq('is_read', false)
+          : primaryUnreadQuery;
 
-      if (countQuery.error) {
-        logger.error({ userId, error: countQuery.error }, 'Failed to count notifications');
+      if (unreadQuery.error) {
+        logger.error({ userId, error: unreadQuery.error }, 'Failed to count notifications');
         return { unread_count: 0 };
       }
 
-      return { unread_count: countQuery.count || 0 };
+      const unreadCount = ((unreadQuery.data || []) as UnreadNotificationRow[]).filter((row) => {
+        const normalizedNotification: NotificationRecord = {
+          notification_id: row.notification_id,
+          user_id: row.user_id ?? row.sent_to ?? userId ?? '',
+          title: "",
+          body: "",
+          description: null,
+          sent_to: row.sent_to ?? row.user_id ?? null,
+          sent_by: row.sent_by ?? null,
+          type:
+            String(row.type ?? "info") === "announcement"
+              ? "global_announcement"
+              : String(row.type ?? "info"),
+          data: null,
+          is_read: false,
+          created_at: "",
+          image_url: null,
+        };
+
+        return !isSelfAuthoredAnnouncement(normalizedNotification);
+      }).length;
+
+      return { unread_count: unreadCount };
     }
   );
 

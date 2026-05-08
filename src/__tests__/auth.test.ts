@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import jwt from 'jsonwebtoken';
-import { requireAuth } from '../middleware/auth.js';
+import { maybeSyncProfilePictureFromSupabaseMetadata, requireAuth } from '../middleware/auth.js';
 import authRoutes from '../routes/auth.js';
 
 test('GET /auth/me without token returns 401', async () => {
@@ -112,4 +112,75 @@ test('requireAuth accepts an uppercase Authorization header', async () => {
   assert.equal(typeof body.user.iat, 'number');
 
   await app.close();
+});
+
+
+test('maybeSyncProfilePictureFromSupabaseMetadata ignores raw Google avatar URLs', async () => {
+  const calls: Array<{
+    table: string;
+    values: Record<string, unknown>;
+    column: string;
+    value: string;
+  }> = [];
+
+  const fakeSupabase = {
+    from(table: string) {
+      return {
+        update(values: Record<string, unknown>) {
+          return {
+            async eq(column: string, value: string) {
+              calls.push({ table, values, column, value });
+              return { error: null };
+            },
+          };
+        },
+      };
+    },
+  } as never;
+
+  const didSync = await maybeSyncProfilePictureFromSupabaseMetadata(
+    fakeSupabase,
+    'user-123',
+    'https://lh3.googleusercontent.com/a/ACg8ocExample=s96-c'
+  );
+
+  assert.equal(didSync, false);
+  assert.equal(calls.length, 0);
+});
+
+test('maybeSyncProfilePictureFromSupabaseMetadata persists object-storage profile picture URLs', async () => {
+  const calls: Array<{
+    table: string;
+    values: Record<string, unknown>;
+    column: string;
+    value: string;
+  }> = [];
+
+  const fakeSupabase = {
+    from(table: string) {
+      return {
+        update(values: Record<string, unknown>) {
+          return {
+            async eq(column: string, value: string) {
+              calls.push({ table, values, column, value });
+              return { error: null };
+            },
+          };
+        },
+      };
+    },
+  } as never;
+
+  const objectUrl = 'https://project.supabase.co/storage/v1/object/public/profilePictures/users/user-123/avatar.webp';
+  const didSync = await maybeSyncProfilePictureFromSupabaseMetadata(fakeSupabase, 'user-123', objectUrl);
+
+  assert.equal(didSync, true);
+  assert.deepEqual(calls, [
+    {
+      table: 'user_table',
+      values: { profile_picture_url: objectUrl },
+      column: 'user_id',
+      value: 'user-123',
+    },
+  ]);
 });

@@ -6,6 +6,15 @@ import path from 'node:path';
 const ITEMS_BUCKET = process.env.ITEMS_BUCKET || 'items';
 const PROFILE_PICTURES_BUCKET = process.env.PROFILE_PICTURES_BUCKET || 'profilePictures';
 
+export function isProfilePictureStorageUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+
+  const normalizedUrl = url.trim();
+  if (normalizedUrl.length === 0) return false;
+
+  return normalizedUrl.includes(`/storage/v1/object/public/${PROFILE_PICTURES_BUCKET}/`);
+}
+
 export interface SignedUploadUrl {
   uploadUrl: string;
   objectPath: string;

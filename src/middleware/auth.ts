@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { getSupabaseClient } from '../services/supabase.js';
 import { isAllowedPortalEmail, normalizePortalEmail, syncPortalUserOnSignIn } from '../services/portal-users.js';
 import { JwtPayload, UserType } from '../types/auth.js';
+import { isProfilePictureStorageUrl } from '../services/storage.js';
 import logger from '../utils/logger.js';
 import { extractBearerToken, getAuthorizationHeader } from '../utils/http-headers.js';
 import { getPhilippineNowIso } from '../utils/time.js';
@@ -47,6 +48,30 @@ function getUserMetadataValue(
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+export async function maybeSyncProfilePictureFromSupabaseMetadata(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  userId: string,
+  profilePictureUrl: string | null
+): Promise<boolean> {
+  // Never persist upstream Google avatar URLs directly. Dedicated auth routes
+  // mirror those images into object storage first and store the resulting URL.
+  if (!isProfilePictureStorageUrl(profilePictureUrl)) {
+    return false;
+  }
+
+  const { error } = await supabase
+    .from('user_table')
+    .update({ profile_picture_url: profilePictureUrl })
+    .eq('user_id', userId);
+
+  if (error) {
+    logger.warn({ error, userId }, 'Failed to persist Supabase metadata profile picture');
+    return false;
+  }
+
+  return true;
+}
+
 async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPayload | null> {
   try {
     const supabase = getSupabaseClient();
@@ -84,12 +109,11 @@ async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPay
       return null;
     }
 
-    if (profilePictureUrl) {
-      await supabase
-        .from('user_table')
-        .update({ profile_picture_url: profilePictureUrl })
-        .eq('user_id', upsertedUser.user_id);
-    }
+    await maybeSyncProfilePictureFromSupabaseMetadata(
+      supabase,
+      upsertedUser.user_id,
+      profilePictureUrl
+    );
 
     return {
       user_id: upsertedUser.user_id,

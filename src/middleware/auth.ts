@@ -1,6 +1,7 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import jwt from 'jsonwebtoken';
 import { getSupabaseClient } from '../services/supabase.js';
+import { isAllowedPortalEmail, normalizePortalEmail, syncPortalUserOnSignIn } from '../services/portal-users.js';
 import { JwtPayload, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
 import { extractBearerToken, getAuthorizationHeader } from '../utils/http-headers.js';
@@ -57,9 +58,8 @@ async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPay
       return null;
     }
 
-    const normalizedEmail = authUser.email.trim().toLowerCase();
-    const allowedDomain = (process.env.ALLOWED_EMAIL_DOMAIN || 'umak.edu.ph').trim().toLowerCase();
-    if (!normalizedEmail.endsWith(`@${allowedDomain}`)) {
+    const normalizedEmail = normalizePortalEmail(authUser.email);
+    if (!isAllowedPortalEmail(normalizedEmail)) {
       logger.warn({ email: normalizedEmail }, 'Blocked Supabase-authenticated user from unauthorized email domain');
       return null;
     }
@@ -73,27 +73,18 @@ async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPay
       getUserMetadataValue(authUser.user_metadata, 'picture');
 
     const loginTimestamp = getPhilippineNowIso();
-    const { data: upsertedUser, error: upsertError } = await supabase
-      .from('user_table')
-      .upsert(
-        {
-          email: normalizedEmail,
-          user_name: normalizedName,
-          last_login: loginTimestamp,
-        },
-        {
-          onConflict: 'email',
-        }
-      )
-      .select('user_id, email, user_type, profile_picture_url')
-      .single();
+    const upsertedUser = await syncPortalUserOnSignIn(supabase, {
+      email: normalizedEmail,
+      userName: normalizedName,
+      loginTimestamp,
+    });
 
-    if (upsertError || !upsertedUser || !isAllowedUserType(upsertedUser.user_type)) {
-      logger.warn({ error: upsertError, email: normalizedEmail }, 'Failed to resolve portal user from Supabase-authenticated user');
+    if (!upsertedUser || !isAllowedUserType(upsertedUser.user_type)) {
+      logger.warn({ email: normalizedEmail }, 'Failed to resolve portal user from Supabase-authenticated user');
       return null;
     }
 
-    if (profilePictureUrl && !upsertedUser.profile_picture_url) {
+    if (profilePictureUrl) {
       await supabase
         .from('user_table')
         .update({ profile_picture_url: profilePictureUrl })

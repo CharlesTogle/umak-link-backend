@@ -3,6 +3,7 @@ import { OAuth2Client } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
 import sharp from 'sharp';
 import { getSupabaseClient } from '../services/supabase.js';
+import { isAllowedPortalEmail, normalizePortalEmail, syncPortalUserOnSignIn } from '../services/portal-users.js';
 import { requireAuth } from '../middleware/auth.js';
 import { AuthLoginRequest, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
@@ -143,11 +144,8 @@ export default async function authRoutes(server: FastifyInstance) {
           });
         }
 
-        const normalizedEmail = payload.email.trim().toLowerCase();
-
-        // Check if email is from allowed domain (UMak)
-        const allowedDomain = (process.env.ALLOWED_EMAIL_DOMAIN || 'umak.edu.ph').trim().toLowerCase();
-        if (!normalizedEmail.endsWith(`@${allowedDomain}`)) {
+        const normalizedEmail = normalizePortalEmail(payload.email);
+        if (!isAllowedPortalEmail(normalizedEmail)) {
           return reply.status(403).send({
             error: 'Access Denied',
             message: 'Sign in failed. Please make sure to use your UMAK Google Account and try again',
@@ -158,35 +156,25 @@ export default async function authRoutes(server: FastifyInstance) {
         const loginTimestamp = getPhilippineNowIso();
         const normalizedName = normalizeNameToTitleCase(payload.name);
 
-        // Upsert user (profile image will be handled separately)
-        const { data: upsertedUser, error: upsertError } = await supabase
-          .from('user_table')
-          .upsert(
-            {
-              email: normalizedEmail,
-              user_name: normalizedName,
-              last_login: loginTimestamp,
-            },
-            {
-              onConflict: 'email',
-            }
-          )
-          .select()
-          .single();
-        let user = upsertedUser;
+        const syncedUser = await syncPortalUserOnSignIn(supabase, {
+          email: normalizedEmail,
+          userName: normalizedName,
+          loginTimestamp,
+        });
 
-        if (upsertError || !user) {
-          logger.error({ error: upsertError }, 'Failed to upsert user');
+        if (!syncedUser) {
           return reply.status(500).send({ error: 'Failed to create user session' });
         }
+
+        let user = syncedUser;
 
         if (!isAllowedUserType(user.user_type)) {
           logger.error({ userId: user.user_id, userType: user.user_type }, 'Invalid user role in database');
           return reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
         }
 
-        // Only upload profile picture if user doesn't have one yet (first-time login)
-        if (payload.picture && !user.profile_picture_url) {
+        // Refresh the stored profile picture on every Google sign-in.
+        if (payload.picture) {
           const uploadedUrl = await uploadProfilePicture(supabase, user.user_id, payload.picture);
           if (uploadedUrl) {
             const { data: updatedUser, error: updateError } = await supabase

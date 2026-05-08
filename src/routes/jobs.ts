@@ -260,7 +260,9 @@ export default async function jobsRoutes(server: FastifyInstance) {
     ).filter((value) => value.length > 0);
     const count = matchedPostIds.length;
     const itemName = toNonEmptyString(record.item_name) ?? 'your missing item';
-    const message = `We found ${count} similar ${count === 1 ? 'item' : 'items'} that might match ${itemName}.`;
+    const message = `We've found ${count} likely ${
+      count === 1 ? 'item' : 'items'
+    } similar to your missing ${itemName}. You can go to the Security Office behind the Oval to inspect.`;
 
     const notificationId = await createNotification({
       user_id: record.poster_id,
@@ -270,8 +272,7 @@ export default async function jobsRoutes(server: FastifyInstance) {
       type: 'match',
       data: {
         postId: String(record.post_id),
-        matched_post_ids: JSON.stringify(matchedPostIds),
-        link: '/user/matches',
+        match_count: count,
       },
     });
 

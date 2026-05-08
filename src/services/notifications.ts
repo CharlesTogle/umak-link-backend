@@ -239,7 +239,7 @@ function getNotificationUrl(
     case 'global_announcement':
       return null;
     case 'match':
-      return normalizedPostId ? getPostPathForRole(role, normalizedPostId) : getNotificationsPathForRole(role);
+      return null;
     case 'accept':
     case 'post_accepted':
       return normalizedPostId ? getPostPathForRole(role, normalizedPostId) : getNotificationsPathForRole(role);

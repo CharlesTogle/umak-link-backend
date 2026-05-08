@@ -4,6 +4,59 @@ import { requireStaff } from '../middleware/auth.js';
 import { UserSearchResponse } from '../types/auth.js';
 import logger from '../utils/logger.js';
 
+const DEFAULT_USER_SEARCH_LIMIT = 20;
+
+type UserSearchRpcError = {
+  code?: string;
+  message: string;
+  details?: string | null;
+  hint?: string | null;
+};
+
+type UserSearchRpcResult = {
+  data: UserSearchResponse['results'] | null;
+  error: UserSearchRpcError | null;
+};
+
+type UserSearchRpcClient = {
+  rpc(functionName: string, args: Record<string, unknown>): PromiseLike<UserSearchRpcResult>;
+};
+
+function isRpcSignatureMismatch(error: UserSearchRpcError | null): boolean {
+  if (!error) return false;
+
+  return (
+    error.code === 'PGRST202' ||
+    error.details?.includes('Searched for the function') === true ||
+    error.message.includes('schema cache')
+  );
+}
+
+export async function searchUsersWithCompatibleRpcSignature(
+  supabase: UserSearchRpcClient,
+  rpcFunction: 'search_users_secure' | 'search_users_secure_staff',
+  query: string,
+  limit = DEFAULT_USER_SEARCH_LIMIT
+): Promise<UserSearchRpcResult> {
+  const primaryAttempt = await supabase.rpc(rpcFunction, {
+    search_query: query,
+    search_limit: limit,
+  });
+
+  if (!primaryAttempt.error || !isRpcSignatureMismatch(primaryAttempt.error)) {
+    return primaryAttempt;
+  }
+
+  logger.warn(
+    { error: primaryAttempt.error, rpcFunction },
+    'User search RPC signature mismatch, retrying with legacy search_term argument'
+  );
+
+  return supabase.rpc(rpcFunction, {
+    search_term: query,
+  });
+}
+
 export default async function usersRoutes(server: FastifyInstance) {
   // GET /users/:id - Get user profile (staff only)
   server.get<{ Params: { id: string } }>(
@@ -61,9 +114,11 @@ export default async function usersRoutes(server: FastifyInstance) {
       const rpcFunction =
         request.user?.user_type === 'Admin' ? 'search_users_secure' : 'search_users_secure_staff';
 
-      const { data, error } = await supabase.rpc(rpcFunction, {
-        search_term: query,
-      });
+      const { data, error } = await searchUsersWithCompatibleRpcSignature(
+        supabase,
+        rpcFunction,
+        query
+      );
 
       if (error) {
         logger.error({ error }, 'User search failed');

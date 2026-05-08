@@ -1379,7 +1379,7 @@ Sample payload:
   "subject": "Item Claim Update",
   "html": "<p>Your item is ready for pickup.</p>",
   "senderUuid": "staff-uuid",
-  "from": "UMak LINK <noreply@umaklink.com>"
+  "from": "UMak-LINK <noreply@umaklink.com>"
 }
 ```
 

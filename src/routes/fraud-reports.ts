@@ -48,7 +48,7 @@ function buildFraudReportOpenedEmail(params: {
     </div>
     <div style="padding:32px 28px;color:#333333;line-height:1.6;">
       <h2 style="color:#1e2b87;margin-top:0;">Dear ${params.claimerName},</h2>
-      <p>An item you claimed through UMak LINK has been reported as a potentially fraudulent claim.</p>
+      <p>An item you claimed through UMak-LINK has been reported as a potentially fraudulent claim.</p>
       <div style="background:#f8f9fa;border-left:4px solid #1e2b87;padding:16px 20px;margin:20px 0;">
         <p style="margin:6px 0;"><strong>Claimed Item:</strong> ${params.postTitle}</p>
         <p style="margin:6px 0;"><strong>Reported By:</strong> ${params.reporterName}</p>

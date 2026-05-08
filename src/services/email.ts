@@ -32,7 +32,7 @@ export async function sendEmail(payload: SendEmailPayload): Promise<{
   try {
     const { data, error } = await withTimeout(
       resend.emails.send({
-        from: from || process.env.RESEND_FROM_EMAIL || 'UMak LINK <noreply@umaklink.com>',
+        from: from || process.env.RESEND_FROM_EMAIL || 'UMak-LINK <noreply@umaklink.com>',
         to: [to],
         subject,
         html,

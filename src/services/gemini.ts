@@ -22,6 +22,11 @@ const CREATE_POST_CATEGORIES = [
 
 const GEMINI_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 const GEMINI_RATE_LIMIT_MAX_REQUESTS = 10;
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+
+function normalizeGeminiModelName(modelName: string): string {
+  return modelName.replace(/^models\//, '');
+}
 
 class GeminiService {
   private client: GoogleGenerativeAI | null = null;
@@ -32,9 +37,12 @@ class GeminiService {
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
+      const modelName = normalizeGeminiModelName(
+        process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL
+      );
       this.client = new GoogleGenerativeAI(apiKey);
-      this.model = this.client.getGenerativeModel({ model: 'gemini-2.0-flash' });
-      logger.info('Gemini service initialized');
+      this.model = this.client.getGenerativeModel({ model: modelName });
+      logger.info({ model: modelName }, 'Gemini service initialized');
     } else {
       logger.warn('GEMINI_API_KEY not configured - AI features disabled');
     }

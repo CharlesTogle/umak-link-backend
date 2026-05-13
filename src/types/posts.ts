@@ -1,3 +1,5 @@
+import { CustodyStatus } from './custody.js';
+
 export type ItemType = 'found' | 'lost' | 'missing';
 export type ItemStatus = 'claimed' | 'unclaimed' | 'discarded' | 'returned' | 'lost';
 export type PostStatus =
@@ -65,6 +67,7 @@ export interface PostRecord {
   claim_processed_by_staff_id: string | null;
   accepted_on_date: string | null;
   is_anonymous: boolean;
+  custody_status?: CustodyStatus;
 }
 
 export interface PostRecordDetails extends PostRecord {

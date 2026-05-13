@@ -19,7 +19,7 @@ const JWT_SECRET: string = (() => {
 })();
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin'];
+const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin', 'Guard'];
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 const LOGIN_TIMEOUT_MESSAGE =

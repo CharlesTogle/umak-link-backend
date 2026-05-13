@@ -22,6 +22,9 @@ import itemsRoutes from './routes/items.js';
 import pendingMatchesRoutes from './routes/pending-matches.js';
 import emailRoutes from './routes/email.js';
 import aiRoutes from './routes/ai.js';
+import custodyRoutes from './routes/custody.js';
+import guardRoutes from './routes/guard.js';
+import custodyJobsRoutes from './routes/custody-jobs.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -115,6 +118,9 @@ await server.register(itemsRoutes, { prefix: '/items' });
 await server.register(pendingMatchesRoutes, { prefix: '/pending-matches' });
 await server.register(emailRoutes, { prefix: '/email' });
 await server.register(aiRoutes, { prefix: '/ai' });
+await server.register(custodyRoutes, { prefix: '/custody' });
+await server.register(guardRoutes, { prefix: '/guard' });
+await server.register(custodyJobsRoutes, { prefix: '/jobs/custody' });
 
 // Error handler
 server.setErrorHandler(errorHandler);

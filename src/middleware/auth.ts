@@ -16,7 +16,9 @@ const JWT_SECRET: string = (() => {
   return secret;
 })();
 
-const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin'];
+const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin', 'Guard'];
+
+let authSupabaseClientFactory: typeof getSupabaseClient = getSupabaseClient;
 
 function isAllowedUserType(value: unknown): value is UserType {
   return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
@@ -49,7 +51,7 @@ function getUserMetadataValue(
 }
 
 export async function maybeSyncProfilePictureFromSupabaseMetadata(
-  supabase: ReturnType<typeof getSupabaseClient>,
+  supabase: ReturnType<typeof authSupabaseClientFactory>,
   userId: string,
   profilePictureUrl: string | null
 ): Promise<boolean> {
@@ -74,7 +76,7 @@ export async function maybeSyncProfilePictureFromSupabaseMetadata(
 
 async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPayload | null> {
   try {
-    const supabase = getSupabaseClient();
+    const supabase = authSupabaseClientFactory();
     const { data, error } = await supabase.auth.getUser(token);
     const authUser = data.user;
 
@@ -129,7 +131,7 @@ async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPay
 async function syncAuthoritativeUser(request: FastifyRequest): Promise<boolean> {
   if (!request.user) return false;
 
-  const supabase = getSupabaseClient();
+  const supabase = authSupabaseClientFactory();
   const { data: user, error } = await supabase
     .from('user_table')
     .select('email, user_type')
@@ -242,6 +244,21 @@ export async function requireAdmin(request: FastifyRequest, reply: FastifyReply)
   }
 }
 
+export async function requireGuard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await requireAuth(request, reply);
+
+  if (reply.sent) return;
+  const isSynced = await syncAuthoritativeUser(request);
+  if (!isSynced) {
+    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    return;
+  }
+
+  if (!request.user || request.user.user_type !== 'Guard') {
+    reply.status(403).send({ error: 'Forbidden', message: 'Guard access required' });
+  }
+}
+
 // Helper functions matching DB role helpers
 export function isStaff(userType: string): boolean {
   return userType === 'Staff';
@@ -253,4 +270,18 @@ export function isAdmin(userType: string): boolean {
 
 export function isStaffOrAdmin(userType: string): boolean {
   return userType === 'Staff' || userType === 'Admin';
+}
+
+export function isGuard(userType: string): boolean {
+  return userType === 'Guard';
+}
+
+export function isGuardOrStaffOrAdmin(userType: string): boolean {
+  return userType === 'Guard' || isStaffOrAdmin(userType);
+}
+
+export function setAuthSupabaseClientFactoryForTests(
+  factory: typeof getSupabaseClient | null
+): void {
+  authSupabaseClientFactory = factory ?? getSupabaseClient;
 }

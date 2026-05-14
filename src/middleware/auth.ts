@@ -128,7 +128,7 @@ async function resolvePortalUserFromSupabaseToken(token: string): Promise<JwtPay
   }
 }
 
-async function syncAuthoritativeUser(request: FastifyRequest): Promise<boolean> {
+export async function syncAuthoritativeUser(request: FastifyRequest): Promise<boolean> {
   if (!request.user) return false;
 
   const supabase = authSupabaseClientFactory();

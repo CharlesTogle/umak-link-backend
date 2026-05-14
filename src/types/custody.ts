@@ -6,7 +6,13 @@ export type CustodyStatus =
   | 'handover_in_progress'
   | 'with_guard'
   | 'in_security_office'
+  | 'claimed_by_student'
   | 'under_investigation';
+
+export type ClaimedCustodyStatus =
+  | 'in_security_office'
+  | 'under_investigation'
+  | 'claimed_by_student';
 
 export type CustodyAttemptStatus =
   | 'open'
@@ -33,7 +39,8 @@ export type StudentCustodyHistoryEventType =
   | 'security_office_received'
   | 'attempt_cancelled'
   | 'under_investigation'
-  | 'physical_take_reported';
+  | 'physical_take_reported'
+  | 'claimed_by_student';
 
 export interface CustodyActor {
   user_id: string;
@@ -188,7 +195,7 @@ export interface PhysicalTakeReportResponse {
   reported_at: string;
 }
 
-export interface NotifyGuardRequest extends StaffCustodyPostRequest {}
+export type NotifyGuardRequest = StaffCustodyPostRequest;
 
 export interface NotifyGuardResponse {
   post_id: number;
@@ -197,6 +204,17 @@ export interface NotifyGuardResponse {
   notification_id: string | number;
   notification_status: 'created';
   requested_at: string;
+}
+
+export interface UpdateClaimedCustodyStatusRequest extends StaffCustodyPostRequest {
+  custody_status: ClaimedCustodyStatus;
+}
+
+export interface UpdateClaimedCustodyStatusResponse {
+  post_id: number;
+  item_id: string;
+  custody_status: ClaimedCustodyStatus;
+  updated_at: string;
 }
 
 export interface StudentCustodyHistoryEntry {

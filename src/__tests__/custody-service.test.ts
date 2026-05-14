@@ -4,6 +4,7 @@ import {
   createCustodyAttempt,
   escalateStaleAcceptedCustodyAttempts,
   notifyGuardForCustodyFollowUp,
+  updateClaimedCustodyStatus,
 } from '../services/custody.js';
 
 const baseInput = {
@@ -22,6 +23,7 @@ const baseInput = {
 for (const custodyStatus of [
   'with_guard',
   'in_security_office',
+  'claimed_by_student',
   'under_investigation',
 ] as const) {
   test(`createCustodyAttempt rejects posts already in ${custodyStatus}`, async () => {
@@ -77,6 +79,203 @@ for (const custodyStatus of [
     );
   });
 }
+
+test('updateClaimedCustodyStatus updates the custody status and writes poster-visible history', async () => {
+  const insertedRecords: Array<Record<string, unknown>> = [];
+  let capturedAuditDetails: Record<string, unknown> | null = null;
+
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'accepted',
+                        item_status: 'claimed',
+                        custody_status: 'claimed_by_student',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'item_id');
+                assert.equal(value, 'item-1');
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_record_table') {
+        return {
+          insert(records: Array<Record<string, unknown>>) {
+            insertedRecords.push(...records);
+            return {
+              error: null,
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  const response = await updateClaimedCustodyStatus(
+    {
+      post_id: 42,
+      custody_status: 'under_investigation',
+      actor: {
+        user_id: 'staff-1',
+        email: 'staff-1@umak.edu.ph',
+        user_type: 'Staff',
+      },
+      details: {
+        claimer_name: 'Jane Doe',
+      },
+    },
+    {
+      getSupabase: () => fakeSupabase,
+      now: () => new Date('2026-05-14T11:20:00.000Z'),
+      auditLogger: async (params) => {
+        capturedAuditDetails = params.details as Record<string, unknown>;
+      },
+    }
+  );
+
+  assert.deepEqual(response, {
+    post_id: 42,
+    item_id: 'item-1',
+    custody_status: 'under_investigation',
+    updated_at: '2026-05-14T11:20:00.000Z',
+  });
+
+  assert.deepEqual(insertedRecords, [
+    {
+      post_id: 42,
+      item_id: 'item-1',
+      custody_attempt_id: null,
+      qr_code_session_id: null,
+      guard_post_id: null,
+      actor_user_id: 'staff-1',
+      record_type: 'investigation_opened',
+      visible_to_poster: true,
+      details: {
+        previous_custody_status: 'claimed_by_student',
+        next_custody_status: 'under_investigation',
+        claimer_name: 'Jane Doe',
+      },
+      occurred_at: '2026-05-14T11:20:00.000Z',
+    },
+  ]);
+
+  assert.deepEqual(capturedAuditDetails, {
+    post_id: 42,
+    item_id: 'item-1',
+    old_custody_status: 'claimed_by_student',
+    new_custody_status: 'under_investigation',
+  });
+});
+
+test('updateClaimedCustodyStatus rejects non-claimed found items', async () => {
+  const fakeSupabase = {
+    from(table: string) {
+      assert.equal(table, 'post_public_view');
+
+      return {
+        select(columns: string) {
+          assert.equal(
+            columns,
+            'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status'
+          );
+
+          return {
+            eq(column: string, value: number) {
+              assert.equal(column, 'post_id');
+              assert.equal(value, 42);
+
+              return {
+                async single() {
+                  return {
+                    data: {
+                      post_id: 42,
+                      item_id: 'item-1',
+                      poster_id: 'user-1',
+                      item_type: 'found',
+                      post_status: 'accepted',
+                      item_status: 'unclaimed',
+                      custody_status: 'in_security_office',
+                    },
+                    error: null,
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as never;
+
+  await assert.rejects(
+    () =>
+      updateClaimedCustodyStatus(
+        {
+          post_id: 42,
+          custody_status: 'claimed_by_student',
+          actor: {
+            user_id: 'staff-1',
+            email: 'staff-1@umak.edu.ph',
+            user_type: 'Staff',
+          },
+        },
+        {
+          getSupabase: () => fakeSupabase,
+        }
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { statusCode?: number }).statusCode, 409);
+      assert.equal(error.message, 'Only claimed found items can update custody status');
+      return true;
+    }
+  );
+});
 
 test('notifyGuardForCustodyFollowUp creates an in-app notification for the accepted guard', async () => {
   let capturedNotificationPayload: Record<string, unknown> | null = null;

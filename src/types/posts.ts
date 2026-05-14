@@ -22,7 +22,14 @@ export interface CreatePostRequest {
   p_item_type: ItemType;
   p_poster_id: string;
   p_image_hash?: string | null;
+  p_image_link?: string;
   p_category?: string;
+  p_last_seen_date?: string;
+  p_last_seen_hours?: number;
+  p_last_seen_minutes?: number;
+  p_item_status?: ItemStatus;
+  p_post_status?: PostStatus;
+  // Legacy fields kept temporarily for older callers and edit paths.
   p_date_day?: number;
   p_date_month?: number;
   p_date_year?: number;

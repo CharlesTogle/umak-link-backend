@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import jwt from 'jsonwebtoken';
+import { setAuthSupabaseClientFactoryForTests } from '../middleware/auth.js';
 import postsRoutes from '../routes/posts.js';
 import { UserType } from '../types/auth.js';
 
@@ -17,6 +18,34 @@ function createToken(userType: UserType, userId = 'user-1', email = 'user-1@umak
     JWT_SECRET,
     { algorithm: 'HS256' }
   );
+}
+
+function createPostsAuthSupabase(userType: UserType, email: string) {
+  return {
+    from(table: string) {
+      assert.equal(table, 'user_table');
+
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                async single() {
+                  return {
+                    data: {
+                      email,
+                      user_type: userType,
+                    },
+                    error: null,
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as never;
 }
 
 test('POST /posts invalid body returns 400', async () => {
@@ -44,6 +73,10 @@ test('POST /posts without auth returns 401', async () => {
       p_item_name: 'Wallet',
       p_item_type: 'found',
       p_image_hash: 'hash',
+      p_image_link: 'https://example.com/items/wallet.webp',
+      p_last_seen_date: '2026-05-14',
+      p_last_seen_hours: 10,
+      p_last_seen_minutes: 30,
       p_location_path: [{ name: 'Lobby', type: 'building' }],
     },
   });
@@ -123,6 +156,10 @@ test('POST /posts recomputes custody status for found items after creation', asy
       p_item_name: 'Wallet',
       p_item_type: 'found',
       p_image_hash: 'hash',
+      p_image_link: 'https://example.com/items/wallet.webp',
+      p_last_seen_date: '2026-05-14',
+      p_last_seen_hours: 10,
+      p_last_seen_minutes: 30,
       p_location_path: [{ name: 'Lobby', type: 'building' }],
     },
   });
@@ -133,6 +170,22 @@ test('POST /posts recomputes custody status for found items after creation', asy
     rpcCalls.map((call) => call.functionName),
     ['create_post_with_item_date_time_location', 'recompute_item_custody_status']
   );
+  assert.deepEqual(rpcCalls[0]?.args, {
+    p_item_name: 'Wallet',
+    p_item_description: undefined,
+    p_item_type: 'found',
+    p_poster_id: 'user-1',
+    p_image_hash: 'hash',
+    p_image_link: 'https://example.com/items/wallet.webp',
+    p_category: undefined,
+    p_last_seen_date: '2026-05-14',
+    p_last_seen_hours: 10,
+    p_last_seen_minutes: 30,
+    p_item_status: 'unclaimed',
+    p_post_status: 'pending',
+    p_location_path: [{ name: 'Lobby', type: 'building' }],
+    p_is_anonymous: undefined,
+  });
   assert.deepEqual(rpcCalls[1]?.args, {
     p_post_id: 123,
     p_item_id: 'item-123',
@@ -219,6 +272,10 @@ test('POST /posts creates an initial security office custody record for staff-cr
       p_item_name: 'ID Lace',
       p_item_type: 'found',
       p_image_hash: 'hash',
+      p_image_link: 'https://example.com/items/id-lace.webp',
+      p_last_seen_date: '2026-05-14',
+      p_last_seen_hours: 11,
+      p_last_seen_minutes: 45,
       p_location_path: [{ name: 'Security Office', type: 'office' }],
     },
   });
@@ -229,6 +286,22 @@ test('POST /posts creates an initial security office custody record for staff-cr
     rpcCalls.map((call) => call.functionName),
     ['create_post_with_item_date_time_location']
   );
+  assert.deepEqual(rpcCalls[0]?.args, {
+    p_item_name: 'ID Lace',
+    p_item_description: undefined,
+    p_item_type: 'found',
+    p_poster_id: 'staff-1',
+    p_image_hash: 'hash',
+    p_image_link: 'https://example.com/items/id-lace.webp',
+    p_category: undefined,
+    p_last_seen_date: '2026-05-14',
+    p_last_seen_hours: 11,
+    p_last_seen_minutes: 45,
+    p_item_status: 'unclaimed',
+    p_post_status: 'pending',
+    p_location_path: [{ name: 'Security Office', type: 'office' }],
+    p_is_anonymous: undefined,
+  });
   assert.equal(custodyRecordInserts.length, 1);
   assert.equal(custodyRecordInserts[0]?.post_id, 456);
   assert.equal(custodyRecordInserts[0]?.item_id, 'item-456');
@@ -253,6 +326,218 @@ test('GET /posts/:id/full without auth returns 401', async () => {
   });
 
   assert.equal(res.statusCode, 401);
+  await app.close();
+});
+
+test('GET /posts/:id/full allows staff to fetch any post', { concurrency: false }, async (t) => {
+  const app = Fastify();
+  const fakeSupabase = {
+    from(table: string) {
+      assert.equal(table, 'v_post_records_details');
+
+      return {
+        select(columns: string) {
+          assert.equal(columns, '*');
+
+          return {
+            eq(column: string, value: number) {
+              assert.equal(column, 'post_id');
+              assert.equal(value, 42);
+
+              return {
+                async single() {
+                  return {
+                    data: {
+                      post_id: 42,
+                      poster_id: 'user-2',
+                      item_name: 'Umbrella',
+                    },
+                    error: null,
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as never;
+
+  await app.register(postsRoutes, {
+    prefix: '/posts',
+    readRouteOptions: {
+      getSupabase: () => fakeSupabase,
+    },
+  });
+
+  setAuthSupabaseClientFactoryForTests(() =>
+    createPostsAuthSupabase('Staff', 'staff-1@umak.edu.ph')
+  );
+  t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/posts/42/full',
+    headers: {
+      authorization: `Bearer ${createToken('Staff', 'staff-1', 'staff-1@umak.edu.ph')}`,
+    },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), {
+    post_id: 42,
+    poster_id: 'user-2',
+    item_name: 'Umbrella',
+  });
+
+  await app.close();
+});
+
+test('GET /posts/:id/full allows a user to fetch their own post', { concurrency: false }, async (t) => {
+  const app = Fastify();
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'poster_id');
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        poster_id: 'user-1',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'v_post_records_details') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, '*');
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        poster_id: 'user-1',
+                        item_name: 'Wallet',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  await app.register(postsRoutes, {
+    prefix: '/posts',
+    readRouteOptions: {
+      getSupabase: () => fakeSupabase,
+    },
+  });
+
+  setAuthSupabaseClientFactoryForTests(() =>
+    createPostsAuthSupabase('User', 'user-1@umak.edu.ph')
+  );
+  t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/posts/42/full',
+    headers: {
+      authorization: `Bearer ${createToken('User', 'user-1', 'user-1@umak.edu.ph')}`,
+    },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), {
+    post_id: 42,
+    poster_id: 'user-1',
+    item_name: 'Wallet',
+  });
+
+  await app.close();
+});
+
+test("GET /posts/:id/full rejects a user fetching another user's post", { concurrency: false }, async (t) => {
+  const app = Fastify();
+  const fakeSupabase = {
+    from(table: string) {
+      assert.equal(table, 'post_public_view');
+
+      return {
+        select(columns: string) {
+          assert.equal(columns, 'poster_id');
+
+          return {
+            eq(column: string, value: number) {
+              assert.equal(column, 'post_id');
+              assert.equal(value, 42);
+
+              return {
+                async single() {
+                  return {
+                    data: {
+                      poster_id: 'user-2',
+                    },
+                    error: null,
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as never;
+
+  await app.register(postsRoutes, {
+    prefix: '/posts',
+    readRouteOptions: {
+      getSupabase: () => fakeSupabase,
+    },
+  });
+
+  setAuthSupabaseClientFactoryForTests(() =>
+    createPostsAuthSupabase('User', 'user-1@umak.edu.ph')
+  );
+  t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/posts/42/full',
+    headers: {
+      authorization: `Bearer ${createToken('User', 'user-1', 'user-1@umak.edu.ph')}`,
+    },
+  });
+
+  assert.equal(res.statusCode, 403);
   await app.close();
 });
 

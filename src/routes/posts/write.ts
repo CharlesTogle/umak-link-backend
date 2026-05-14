@@ -166,19 +166,34 @@ export default async function postsWriteRoutes(
       schema: {
         body: {
           type: 'object',
-          required: ['p_item_name', 'p_item_type', 'p_location_path'],
+          required: [
+            'p_item_name',
+            'p_item_type',
+            'p_image_link',
+            'p_last_seen_date',
+            'p_last_seen_hours',
+            'p_last_seen_minutes',
+            'p_location_path',
+          ],
           properties: {
             p_item_name: { type: 'string', minLength: 1 },
             p_item_description: { type: 'string' },
             p_item_type: { type: 'string', enum: ['found', 'lost', 'missing'] },
             p_poster_id: { type: 'string' },
             p_image_hash: { type: ['string', 'null'] },
+            p_image_link: { type: 'string', minLength: 1 },
             p_category: { type: 'string' },
-            p_date_day: { type: 'number' },
-            p_date_month: { type: 'number' },
-            p_date_year: { type: 'number' },
-            p_time_hour: { type: 'number' },
-            p_time_minute: { type: 'number' },
+            p_last_seen_date: { type: 'string', minLength: 1 },
+            p_last_seen_hours: { type: 'number' },
+            p_last_seen_minutes: { type: 'number' },
+            p_item_status: {
+              type: 'string',
+              enum: ['claimed', 'unclaimed', 'discarded', 'returned', 'lost'],
+            },
+            p_post_status: {
+              type: 'string',
+              enum: ['pending', 'accepted', 'rejected', 'archived', 'deleted', 'reported', 'fraud'],
+            },
             p_location_path: {
               type: 'array',
               minItems: 1,
@@ -214,6 +229,9 @@ export default async function postsWriteRoutes(
               itemType: body.p_item_type,
               itemName: body.p_item_name,
             });
+      const itemStatus =
+        body.p_item_status ?? (body.p_item_type === 'found' ? 'unclaimed' : 'lost');
+      const postStatus = body.p_post_status ?? 'pending';
 
       const { data, error } = await supabase.rpc('create_post_with_item_date_time_location', {
         p_item_name: body.p_item_name,
@@ -221,12 +239,13 @@ export default async function postsWriteRoutes(
         p_item_type: body.p_item_type,
         p_poster_id: posterId,
         p_image_hash: imageHash,
+        p_image_link: body.p_image_link,
         p_category: body.p_category,
-        p_date_day: body.p_date_day,
-        p_date_month: body.p_date_month,
-        p_date_year: body.p_date_year,
-        p_time_hour: body.p_time_hour,
-        p_time_minute: body.p_time_minute,
+        p_last_seen_date: body.p_last_seen_date,
+        p_last_seen_hours: body.p_last_seen_hours,
+        p_last_seen_minutes: body.p_last_seen_minutes,
+        p_item_status: itemStatus,
+        p_post_status: postStatus,
         p_location_path: body.p_location_path,
         p_is_anonymous: body.p_is_anonymous,
       });

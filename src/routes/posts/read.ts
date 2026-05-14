@@ -1,12 +1,46 @@
 import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../../services/supabase.js';
-import { requireAuth, requireStaff } from '../../middleware/auth.js';
+import { isStaffOrAdmin, requireAuth, syncAuthoritativeUser } from '../../middleware/auth.js';
 import { PostListResponse, PostRecord } from '../../types/posts.js';
+import { createHttpError } from '../../utils/http-error.js';
 import logger from '../../utils/logger.js';
 import { parsePagination } from '../../utils/pagination.js';
 
+type SupabaseClientLike = ReturnType<typeof getSupabaseClient>;
+
+function normalizeClaimedCustodyStatus<T extends { item_status?: string | null; custody_status?: string | null }>(
+  post: T
+): T {
+  if ((post.item_status ?? '').toLowerCase() !== 'claimed') {
+    return post;
+  }
+
+  if (
+    post.custody_status === 'claimed_by_student' ||
+    post.custody_status === 'in_security_office' ||
+    post.custody_status === 'under_investigation'
+  ) {
+    return post;
+  }
+
+  return {
+    ...post,
+    custody_status: 'claimed_by_student',
+  };
+}
+
+function normalizeClaimedCustodyStatuses<T extends { item_status?: string | null; custody_status?: string | null }>(
+  posts: T[]
+): T[] {
+  return posts.map((post) => normalizeClaimedCustodyStatus(post));
+}
+
+export interface PostsReadRouteOptions {
+  getSupabase?: () => SupabaseClientLike;
+}
+
 async function attachPosterProfileUrls<T extends { poster_id?: string | null }>(
-  supabase: ReturnType<typeof getSupabaseClient>,
+  supabase: SupabaseClientLike,
   posts: T[]
 ): Promise<Array<T & { poster_profile_picture_url?: string | null }>> {
   const posterIds = Array.from(
@@ -33,7 +67,27 @@ async function attachPosterProfileUrls<T extends { poster_id?: string | null }>(
   }));
 }
 
-export default async function postsReadRoutes(server: FastifyInstance) {
+async function getPostAccessRecord(supabase: SupabaseClientLike, postId: number) {
+  const { data, error } = await supabase
+    .from('post_public_view')
+    .select('poster_id')
+    .eq('post_id', postId)
+    .single();
+
+  if (error || !data) {
+    logger.error({ error, postId }, 'Failed to fetch post access record');
+    throw createHttpError('Post not found', 404);
+  }
+
+  return data;
+}
+
+export default async function postsReadRoutes(
+  server: FastifyInstance,
+  options: PostsReadRouteOptions = {}
+) {
+  const getSupabase = options.getSupabase ?? getSupabaseClient;
+
   // GET /posts - Comprehensive post listing with filtering
   server.get<{
     Querystring: {
@@ -53,7 +107,7 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       order_direction?: 'asc' | 'desc';
     };
   }>('/', async (request): Promise<PostListResponse> => {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabase();
     const {
       type,
       item_type,
@@ -77,7 +131,10 @@ export default async function postsReadRoutes(server: FastifyInstance) {
 
     // Apply filters based on type
     if (type === 'public') {
-      query = query.eq('item_type', 'found').in('post_status', ['accepted', 'reported']);
+      query = query
+        .eq('item_type', 'found')
+        .in('post_status', ['accepted', 'reported'])
+        .eq('item_status', 'claimed');
     } else if (type === 'pending') {
       query = query.eq('post_status', 'pending');
     } else if (type === 'own' && poster_id) {
@@ -114,7 +171,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
         throw new Error('Failed to fetch posts');
       }
 
-      return { posts: linkedData || [], count: linkedData?.length };
+      const normalizedLinkedPosts = normalizeClaimedCustodyStatuses(linkedData || []);
+      return { posts: normalizedLinkedPosts, count: normalizedLinkedPosts.length };
     }
 
     // Handle post_ids filter
@@ -149,7 +207,10 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       let countQuery = supabase.from('post_public_view').select('*', { count: 'exact', head: true });
 
       if (type === 'public') {
-        countQuery = countQuery.eq('item_type', 'found').in('post_status', ['accepted', 'reported']);
+        countQuery = countQuery
+          .eq('item_type', 'found')
+          .in('post_status', ['accepted', 'reported'])
+          .eq('item_status', 'claimed');
       } else if (type === 'pending') {
         countQuery = countQuery.eq('post_status', 'pending');
       } else if (type === 'own' && poster_id) {
@@ -172,16 +233,20 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
 
     const enrichedPosts = await attachPosterProfileUrls(supabase, posts || []);
-    return { posts: enrichedPosts || [], count: totalCount || posts?.length };
+    const normalizedPosts = normalizeClaimedCustodyStatuses(enrichedPosts || []);
+    return { posts: normalizedPosts, count: totalCount ?? normalizedPosts.length };
   });
 
   // GET /posts/public - List all public posts (kept for backward compatibility)
   server.get('/public', async (): Promise<PostListResponse> => {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabase();
 
     const { data: posts, error } = await supabase
       .from('post_public_view')
       .select('*')
+      .eq('item_type', 'found')
+      .in('post_status', ['accepted', 'reported'])
+      .eq('item_status', 'claimed')
       .order('submission_date', { ascending: false });
 
     if (error) {
@@ -190,7 +255,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
 
     const enrichedPosts = await attachPosterProfileUrls(supabase, posts || []);
-    return { posts: enrichedPosts || [], count: posts?.length };
+    const normalizedPosts = normalizeClaimedCustodyStatuses(enrichedPosts || []);
+    return { posts: normalizedPosts, count: normalizedPosts.length };
   });
 
   // GET /posts/count - Get total posts count with filters
@@ -203,13 +269,16 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       poster_id?: string;
     };
   }>('/count', async (request) => {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabase();
     const { type, item_type, status, item_status, poster_id } = request.query;
 
     let query = supabase.from('post_public_view').select('*', { count: 'exact', head: true });
 
     if (type === 'public') {
-      query = query.eq('item_type', 'found').in('post_status', ['accepted', 'reported']);
+      query = query
+        .eq('item_type', 'found')
+        .in('post_status', ['accepted', 'reported'])
+        .eq('item_status', 'claimed');
     } else if (type === 'pending') {
       query = query.eq('post_status', 'pending');
     } else if (type === 'own' && poster_id) {
@@ -238,7 +307,7 @@ export default async function postsReadRoutes(server: FastifyInstance) {
 
   // GET /posts/by-item/:itemId - Get post by item ID
   server.get<{ Params: { itemId: string } }>('/by-item/:itemId', async (request) => {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabase();
     const itemId = request.params.itemId;
 
     const { data: post, error } = await supabase
@@ -253,12 +322,12 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
 
     const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
-    return enriched ?? post;
+    return normalizeClaimedCustodyStatus(enriched ?? post);
   });
 
   // GET /posts/by-item-details/:itemId - Get post record by item ID (from details view)
   server.get<{ Params: { itemId: string } }>('/by-item-details/:itemId', async (request) => {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabase();
     const itemId = request.params.itemId;
 
     const { data: post, error } = await supabase
@@ -273,12 +342,12 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
 
     const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
-    return enriched ?? post;
+    return normalizeClaimedCustodyStatus(enriched ?? post);
   });
 
   // GET /posts/:id - Get single post detail
   server.get<{ Params: { id: string } }>('/:id', async (request): Promise<PostRecord> => {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabase();
     const postId = parseInt(request.params.id, 10);
 
     const { data: post, error } = await supabase
@@ -293,18 +362,38 @@ export default async function postsReadRoutes(server: FastifyInstance) {
     }
 
     const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
-    return enriched ?? post;
+    return normalizeClaimedCustodyStatus(enriched ?? post);
   });
 
-  // GET /posts/:id/full - Get full post details (staff only)
+  // GET /posts/:id/full - Get full post details (staff/admin or post owner)
   server.get<{ Params: { id: string } }>(
     '/:id/full',
     {
-      preHandler: [requireStaff],
+      preHandler: [requireAuth],
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = getSupabase();
       const postId = parseInt(request.params.id, 10);
+
+      if (!request.user) {
+        throw createHttpError('Unauthorized', 401);
+      }
+
+      const isSynced = await syncAuthoritativeUser(request);
+      if (!isSynced || !request.user) {
+        throw createHttpError('Session validation failed', 401);
+      }
+
+      if (!isStaffOrAdmin(request.user.user_type)) {
+        if (request.user.user_type !== 'User') {
+          throw createHttpError('Forbidden', 403);
+        }
+
+        const postAccessRecord = await getPostAccessRecord(supabase, postId);
+        if (postAccessRecord.poster_id !== request.user.user_id) {
+          throw createHttpError('Forbidden', 403);
+        }
+      }
 
       const { data: post, error } = await supabase
         .from('v_post_records_details')
@@ -317,7 +406,7 @@ export default async function postsReadRoutes(server: FastifyInstance) {
         throw new Error('Post not found');
       }
 
-      return post;
+      return normalizeClaimedCustodyStatus(post);
     }
   );
 
@@ -328,7 +417,7 @@ export default async function postsReadRoutes(server: FastifyInstance) {
       preHandler: [requireAuth],
     },
     async (request): Promise<PostListResponse> => {
-      const supabase = getSupabaseClient();
+      const supabase = getSupabase();
       const userId = request.params.userId;
 
       // Ensure user can only fetch their own posts unless they're staff
@@ -347,7 +436,8 @@ export default async function postsReadRoutes(server: FastifyInstance) {
         throw new Error('Failed to fetch posts');
       }
 
-      return { posts: posts || [], count: posts?.length };
+      const normalizedPosts = normalizeClaimedCustodyStatuses(posts || []);
+      return { posts: normalizedPosts, count: normalizedPosts.length };
     }
   );
 }

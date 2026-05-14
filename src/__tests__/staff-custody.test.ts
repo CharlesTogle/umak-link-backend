@@ -9,11 +9,13 @@ import {
   OpenCustodyInvestigationInput,
   ReportPhysicalTakeInput,
   SecurityOfficeReceiptInput,
+  UpdateClaimedCustodyStatusInput,
 } from '../services/custody.js';
 import {
   NotifyGuardRequest,
   PhysicalTakeReportRequest,
   StaffCustodyPostRequest,
+  UpdateClaimedCustodyStatusRequest,
 } from '../types/custody.js';
 import { UserType } from '../types/auth.js';
 
@@ -30,6 +32,11 @@ const completePhysicalTakePayload: PhysicalTakeReportRequest = {
 
 const completeNotifyGuardPayload: NotifyGuardRequest = {
   post_id: 42,
+};
+
+const completeClaimedCustodyStatusPayload: UpdateClaimedCustodyStatusRequest = {
+  post_id: 42,
+  custody_status: 'claimed_by_student',
 };
 
 function createToken(userType: UserType, userId = 'staff-1', email = 'staff-1@umak.edu.ph'): string {
@@ -100,6 +107,12 @@ function createStaffCustodyServices(): StaffCustodyRouteServices {
       notification_id: 'notification-1',
       notification_status: 'created',
       requested_at: '2026-05-14T11:15:00.000Z',
+    }),
+    updateClaimedCustodyStatus: async () => ({
+      post_id: 42,
+      item_id: 'item-1',
+      custody_status: 'claimed_by_student',
+      updated_at: '2026-05-14T11:20:00.000Z',
     }),
   };
 }
@@ -191,6 +204,25 @@ for (const missingField of ['post_id', 'guard_id'] as const) {
   });
 }
 
+for (const missingField of ['post_id', 'custody_status'] as const) {
+  test(`PUT /staff/custody/status missing ${missingField} returns 400`, async () => {
+    const app = Fastify();
+    await app.register(staffCustodyRoutes, { prefix: '/staff' });
+
+    const payload = { ...completeClaimedCustodyStatusPayload } as Record<string, unknown>;
+    delete payload[missingField];
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/staff/custody/status',
+      payload,
+    });
+
+    assert.equal(res.statusCode, 400);
+    await app.close();
+  });
+}
+
 for (const authCase of [
   {
     name: 'without auth',
@@ -228,6 +260,43 @@ for (const authCase of [
   });
 }
 
+for (const authCase of [
+  {
+    name: 'without auth',
+    headers: undefined,
+    expectedStatus: 401,
+  },
+  {
+    name: 'with malformed header',
+    headers: {
+      authorization: 'Token malformed',
+    },
+    expectedStatus: 401,
+  },
+  {
+    name: 'with wrong auth token',
+    headers: {
+      authorization: 'Bearer not-a-jwt-token',
+    },
+    expectedStatus: 401,
+  },
+] as const) {
+  test(`PUT /staff/custody/status ${authCase.name} returns ${authCase.expectedStatus}`, async () => {
+    const app = Fastify();
+    await app.register(staffCustodyRoutes, { prefix: '/staff' });
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/staff/custody/status',
+      headers: authCase.headers,
+      payload: completeClaimedCustodyStatusPayload,
+    });
+
+    assert.equal(res.statusCode, authCase.expectedStatus);
+    await app.close();
+  });
+}
+
 for (const config of [
   {
     url: '/staff/custody/security-office/receive',
@@ -245,8 +314,12 @@ for (const config of [
     url: '/staff/custody/guards/notify',
     payload: completeNotifyGuardPayload,
   },
+  {
+    url: '/staff/custody/status',
+    payload: completeClaimedCustodyStatusPayload,
+  },
 ] as const) {
-  test(`POST ${config.url} rejects admin access with 403`, { concurrency: false }, async (t) => {
+  test(`${config.url.startsWith('/staff/custody/status') ? 'PUT' : 'POST'} ${config.url} rejects admin access with 403`, { concurrency: false }, async (t) => {
     const app = Fastify();
     await app.register(staffCustodyRoutes, { prefix: '/staff' });
 
@@ -256,7 +329,7 @@ for (const config of [
     t.after(() => setAuthSupabaseClientFactoryForTests(null));
 
     const res = await app.inject({
-      method: 'POST',
+      method: config.url === '/staff/custody/status' ? 'PUT' : 'POST',
       url: config.url,
       headers: {
         authorization: `Bearer ${createToken('Admin', 'admin-1', 'admin-1@umak.edu.ph')}`,
@@ -450,6 +523,56 @@ test('POST /staff/custody/guards/notify passes the authenticated staff to the se
   assert.ok(capturedInput);
   const captured = capturedInput as NotifyGuardInput;
   assert.equal(captured.post_id, completeNotifyGuardPayload.post_id);
+  assert.equal(captured.actor.user_id, 'staff-123');
+  assert.equal(captured.actor.user_type, 'Staff');
+  assert.equal(captured.actor.email, 'staff-123@umak.edu.ph');
+
+  await app.close();
+});
+
+test('PUT /staff/custody/status passes the authenticated staff to the service', { concurrency: false }, async (t) => {
+  const app = Fastify();
+  let capturedInput: UpdateClaimedCustodyStatusInput | null = null;
+  const services: StaffCustodyRouteServices = {
+    ...createStaffCustodyServices(),
+    updateClaimedCustodyStatus: async (input) => {
+      capturedInput = input;
+      return {
+        post_id: 42,
+        item_id: 'item-1',
+        custody_status: 'under_investigation',
+        updated_at: '2026-05-14T11:20:00.000Z',
+      };
+    },
+  };
+
+  await app.register(staffCustodyRoutes, {
+    prefix: '/staff',
+    services,
+  });
+
+  setAuthSupabaseClientFactoryForTests(() =>
+    createStaffAuthSupabase('Staff', 'staff-123@umak.edu.ph')
+  );
+  t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+  const res = await app.inject({
+    method: 'PUT',
+    url: '/staff/custody/status',
+    headers: {
+      authorization: `Bearer ${createToken('Staff', 'staff-123', 'staff-123@umak.edu.ph')}`,
+    },
+    payload: {
+      post_id: 42,
+      custody_status: 'under_investigation',
+    },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(capturedInput);
+  const captured = capturedInput as UpdateClaimedCustodyStatusInput;
+  assert.equal(captured.post_id, 42);
+  assert.equal(captured.custody_status, 'under_investigation');
   assert.equal(captured.actor.user_id, 'staff-123');
   assert.equal(captured.actor.user_type, 'Staff');
   assert.equal(captured.actor.email, 'staff-123@umak.edu.ph');

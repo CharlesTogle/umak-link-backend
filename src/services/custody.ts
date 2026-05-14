@@ -6,6 +6,7 @@ import logger from '../utils/logger.js';
 import { createHttpError } from '../utils/http-error.js';
 import {
   CancelCustodySessionResponse,
+  ClaimedCustodyStatus,
   CreateCustodyAttemptRequest,
   CreateCustodyAttemptResponse,
   CustodyActor,
@@ -30,6 +31,8 @@ import {
   StaffCustodyPostRequest,
   StudentCustodyHistoryEntry,
   StudentCustodyHistoryResponse,
+  UpdateClaimedCustodyStatusRequest,
+  UpdateClaimedCustodyStatusResponse,
 } from '../types/custody.js';
 
 function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
@@ -76,6 +79,7 @@ interface PostCustodyAccessRow {
   poster_id: string | null;
   item_type: string | null;
   post_status: string | null;
+  item_status?: string | null;
   custody_status: CustodyStatus | null;
   submission_date?: string;
 }
@@ -226,6 +230,13 @@ export interface NotifyGuardInput extends NotifyGuardRequest {
   actor: CustodyActor;
 }
 
+export interface UpdateClaimedCustodyStatusInput
+  extends UpdateClaimedCustodyStatusRequest {
+  actor: CustodyActor;
+  details?: Record<string, unknown>;
+  occurred_at?: string;
+}
+
 function defaultHashSessionToken(sessionToken: string): string {
   return crypto.createHash('sha256').update(sessionToken).digest('hex');
 }
@@ -248,6 +259,38 @@ function resolveDependencies(deps?: CustodyServiceDependencies) {
     auditLogger: deps?.auditLogger ?? logAudit,
     notificationCreator: deps?.notificationCreator ?? createNotification,
   };
+}
+
+function isClaimedCustodyStatus(
+  status: CustodyStatus | null | undefined
+): status is ClaimedCustodyStatus {
+  return (
+    status === 'in_security_office' ||
+    status === 'under_investigation' ||
+    status === 'claimed_by_student'
+  );
+}
+
+function getClaimedCustodyRecordType(status: ClaimedCustodyStatus): string {
+  switch (status) {
+    case 'in_security_office':
+      return 'security_office_received';
+    case 'under_investigation':
+      return 'investigation_opened';
+    case 'claimed_by_student':
+      return 'claimed_by_student';
+  }
+}
+
+function getClaimedCustodyAuditAction(status: ClaimedCustodyStatus): string {
+  switch (status) {
+    case 'in_security_office':
+      return 'custody_claimed_item_marked_in_security_office';
+    case 'under_investigation':
+      return 'custody_claimed_item_marked_under_investigation';
+    case 'claimed_by_student':
+      return 'custody_claimed_item_marked_claimed_by_student';
+  }
 }
 
 async function getPostCustodyAccessRow(
@@ -806,6 +849,7 @@ export async function createCustodyAttempt(
   if (
     postRow.custody_status === 'with_guard' ||
     postRow.custody_status === 'in_security_office' ||
+    postRow.custody_status === 'claimed_by_student' ||
     postRow.custody_status === 'under_investigation'
   ) {
     throw createHttpError('Post cannot start a new custody handover from its current custody state', 409);
@@ -1544,6 +1588,10 @@ export async function getStudentCustodyHistory(
         eventType = 'physical_take_reported';
         message = `A physical handover without QR acceptance involving Guard ${reportedGuardName ?? 'Unknown Guard'} was reported`;
         break;
+      case 'claimed_by_student':
+        eventType = 'claimed_by_student';
+        message = 'Item has been claimed by the student';
+        break;
       default:
         break;
     }
@@ -1574,11 +1622,17 @@ export async function getStudentCustodyHistory(
     return new Date(left.occurred_at).getTime() - new Date(right.occurred_at).getTime();
   });
 
+  const latestHistoryEvent = history[history.length - 1] ?? null;
+  const derivedCustodyStatus =
+    latestHistoryEvent?.event_type === 'claimed_by_student'
+      ? 'claimed_by_student'
+      : postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id));
+
   return {
     post_id: postRow.post_id,
     item_id: postRow.item_id,
     post_status: postRow.post_status,
-    custody_status: postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id)),
+    custody_status: derivedCustodyStatus,
     history,
   };
 }
@@ -1736,6 +1790,95 @@ export async function openCustodyInvestigation(
     custody_attempt_id: latestAttempt.custody_attempt_id,
     custody_status: await getItemCustodyStatus(supabase, latestAttempt.item_id),
     investigation_opened_at: timestamp,
+  };
+}
+
+export async function updateClaimedCustodyStatus(
+  input: UpdateClaimedCustodyStatusInput,
+  deps?: CustodyServiceDependencies
+): Promise<UpdateClaimedCustodyStatusResponse> {
+  const { getSupabase, now, auditLogger } = resolveDependencies(deps);
+  const supabase = getSupabase();
+  const timestamp = input.occurred_at ?? now().toISOString();
+
+  if (!isClaimedCustodyStatus(input.custody_status)) {
+    throw createHttpError('Invalid claimed custody status', 400);
+  }
+
+  const postRow = await getPostCustodyAccessRow(
+    supabase,
+    input.post_id,
+    'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status'
+  );
+
+  if (postRow.item_type !== 'found') {
+    throw createHttpError('Custody flow only applies to found items', 400);
+  }
+
+  if ((postRow.item_status ?? '').toLowerCase() !== 'claimed') {
+    throw createHttpError('Only claimed found items can update custody status', 409);
+  }
+
+  const currentCustodyStatus = postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id));
+  if (currentCustodyStatus === input.custody_status) {
+    return {
+      post_id: postRow.post_id,
+      item_id: postRow.item_id,
+      custody_status: input.custody_status,
+      updated_at: timestamp,
+    };
+  }
+
+  const { error: updateError } = await supabase
+    .from('item_table')
+    .update({ custody_status: input.custody_status })
+    .eq('item_id', postRow.item_id);
+
+  if (updateError) {
+    logger.error(
+      { error: updateError, postId: input.post_id, itemId: postRow.item_id, custodyStatus: input.custody_status },
+      'Failed to update claimed item custody status'
+    );
+    throw createHttpError('Failed to update claimed item custody status', 500);
+  }
+
+  await insertCustodyRecords(supabase, [
+    {
+      post_id: postRow.post_id,
+      item_id: postRow.item_id,
+      custody_attempt_id: null,
+      qr_code_session_id: null,
+      guard_post_id: null,
+      actor_user_id: input.actor.user_id,
+      record_type: getClaimedCustodyRecordType(input.custody_status),
+      visible_to_poster: true,
+      details: {
+        previous_custody_status: currentCustodyStatus,
+        next_custody_status: input.custody_status,
+        ...input.details,
+      },
+      occurred_at: timestamp,
+    },
+  ]);
+
+  await auditLogger({
+    userId: input.actor.user_id,
+    actionType: getClaimedCustodyAuditAction(input.custody_status),
+    tableName: 'item_table',
+    recordId: postRow.item_id,
+    details: {
+      post_id: postRow.post_id,
+      item_id: postRow.item_id,
+      old_custody_status: currentCustodyStatus,
+      new_custody_status: input.custody_status,
+    },
+  });
+
+  return {
+    post_id: postRow.post_id,
+    item_id: postRow.item_id,
+    custody_status: input.custody_status,
+    updated_at: timestamp,
   };
 }
 

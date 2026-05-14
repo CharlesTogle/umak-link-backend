@@ -25,6 +25,7 @@ import aiRoutes from './routes/ai.js';
 import custodyRoutes from './routes/custody.js';
 import guardRoutes from './routes/guard.js';
 import custodyJobsRoutes from './routes/custody-jobs.js';
+import staffCustodyRoutes from './routes/staff-custody.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -54,6 +55,12 @@ function validateStartupConfig() {
 
   if (ALLOWED_ORIGIN_LIST.includes('*')) {
     logger.error('ALLOWED_ORIGINS contains *. This is not allowed for authenticated APIs.');
+  }
+
+  if (!process.env.CUSTODY_AUTOMATION_STAFF_USER_ID) {
+    logger.warn(
+      'Missing CUSTODY_AUTOMATION_STAFF_USER_ID. Automated stale custody escalation jobs will fail until it is configured.'
+    );
   }
 }
 
@@ -120,6 +127,7 @@ await server.register(emailRoutes, { prefix: '/email' });
 await server.register(aiRoutes, { prefix: '/ai' });
 await server.register(custodyRoutes, { prefix: '/custody' });
 await server.register(guardRoutes, { prefix: '/guard' });
+await server.register(staffCustodyRoutes, { prefix: '/staff' });
 await server.register(custodyJobsRoutes, { prefix: '/jobs/custody' });
 
 // Error handler

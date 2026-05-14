@@ -5,6 +5,8 @@ import { CreatePostRequest, EditPostRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
 import { logAudit, getUserName } from '../../utils/audit-logger.js';
 
+type SupabaseClientLike = ReturnType<typeof getSupabaseClient>;
+
 function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
   const error = new Error(message) as Error & { statusCode: number };
   error.statusCode = statusCode;
@@ -28,6 +30,98 @@ async function getPostAccessRecord(supabase: ReturnType<typeof getSupabaseClient
   }
 
   return data;
+}
+
+function resolveCreatedPostId(data: unknown): number {
+  if (typeof data === 'number' && Number.isFinite(data)) {
+    return data;
+  }
+
+  if (Array.isArray(data) && data.length > 0) {
+    const candidate = data[0] as { out_post_id?: unknown } | undefined;
+    if (typeof candidate?.out_post_id === 'number' && Number.isFinite(candidate.out_post_id)) {
+      return candidate.out_post_id;
+    }
+  }
+
+  if (data && typeof data === 'object') {
+    const candidate = data as { out_post_id?: unknown; post_id?: unknown };
+    if (typeof candidate.out_post_id === 'number' && Number.isFinite(candidate.out_post_id)) {
+      return candidate.out_post_id;
+    }
+
+    if (typeof candidate.post_id === 'number' && Number.isFinite(candidate.post_id)) {
+      return candidate.post_id;
+    }
+  }
+
+  throw new Error('Unexpected create_post_with_item_date_time_location response');
+}
+
+async function syncFoundPostCustodyStatus(
+  supabase: SupabaseClientLike,
+  params: {
+    postId: number;
+    actorUserId: string;
+    actorUserType: string;
+  }
+): Promise<void> {
+  const { postId, actorUserId, actorUserType } = params;
+  const { data: postRecord, error: postError } = await supabase
+    .from('post_public_view')
+    .select('post_id, item_id, item_type')
+    .eq('post_id', postId)
+    .single();
+
+  if (postError || !postRecord) {
+    logger.error({ error: postError, postId }, 'Failed to fetch post for initial custody status sync');
+    throw new Error('Failed to create post');
+  }
+
+  if (postRecord.item_type !== 'found') {
+    return;
+  }
+
+  if (actorUserType === 'Staff') {
+    const officeReceivedAt = new Date().toISOString();
+    const { error: insertError } = await supabase.from('custody_record_table').insert({
+      post_id: postId,
+      item_id: postRecord.item_id,
+      custody_attempt_id: null,
+      qr_code_session_id: null,
+      guard_post_id: null,
+      actor_user_id: actorUserId,
+      record_type: 'security_office_received',
+      visible_to_poster: true,
+      details: {
+        source: 'staff_created_post',
+      },
+      occurred_at: officeReceivedAt,
+    });
+
+    if (insertError) {
+      logger.error(
+        { error: insertError, postId, itemId: postRecord.item_id, actorUserId },
+        'Failed to create initial security office custody record for staff-created found post'
+      );
+      throw new Error('Failed to create post');
+    }
+
+    return;
+  }
+
+  const { error: recomputeError } = await supabase.rpc('recompute_item_custody_status', {
+    p_post_id: postId,
+    p_item_id: postRecord.item_id,
+  });
+
+  if (recomputeError) {
+    logger.error(
+      { error: recomputeError, postId, itemId: postRecord.item_id },
+      'Failed to sync initial custody status for found post'
+    );
+    throw new Error('Failed to create post');
+  }
 }
 
 function assertUserOwnsPost(post: { poster_id: string | null }, userId: string) {
@@ -54,7 +148,16 @@ function assertUserCanDeletePost(post: { post_status: string | null; item_status
   }
 }
 
-export default async function postsWriteRoutes(server: FastifyInstance) {
+export interface PostsWriteRouteOptions {
+  getSupabase?: () => SupabaseClientLike;
+}
+
+export default async function postsWriteRoutes(
+  server: FastifyInstance,
+  options: PostsWriteRouteOptions = {}
+) {
+  const getSupabase = options.getSupabase ?? getSupabaseClient;
+
   // POST /posts - Create new post
   server.post<{ Body: CreatePostRequest }>(
     '/',
@@ -95,7 +198,7 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = getSupabase();
       const body = request.body;
       const posterId = request.user?.user_id;
 
@@ -133,8 +236,17 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
         throw new Error(error.message || 'Failed to create post');
       }
 
-      logger.info({ postId: data }, 'Post created');
-      return { post_id: data };
+      const postId = resolveCreatedPostId(data);
+      if (body.p_item_type === 'found') {
+        await syncFoundPostCustodyStatus(supabase, {
+          postId,
+          actorUserId: posterId,
+          actorUserType: request.user?.user_type ?? 'User',
+        });
+      }
+
+      logger.info({ postId }, 'Post created');
+      return { post_id: postId };
     }
   );
 
@@ -181,7 +293,7 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = getSupabase();
       const postId = parseInt(request.params.id, 10);
       const body = request.body;
       const userId = request.user?.user_id;
@@ -237,7 +349,7 @@ export default async function postsWriteRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = getSupabase();
       const postId = parseInt(request.params.id, 10);
       const userId = request.user?.user_id;
 

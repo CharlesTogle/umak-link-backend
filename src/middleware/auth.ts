@@ -229,6 +229,21 @@ export async function requireStaff(request: FastifyRequest, reply: FastifyReply)
   }
 }
 
+export async function requireStaffOnly(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await requireAuth(request, reply);
+
+  if (reply.sent) return;
+  const isSynced = await syncAuthoritativeUser(request);
+  if (!isSynced) {
+    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    return;
+  }
+
+  if (!request.user || request.user.user_type !== 'Staff') {
+    reply.status(403).send({ error: 'Forbidden', message: 'Staff access required' });
+  }
+}
+
 export async function requireAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   await requireAuth(request, reply);
 

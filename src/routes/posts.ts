@@ -1,12 +1,19 @@
 import { FastifyInstance } from 'fastify';
 import postsReadRoutes from './posts/read.js';
-import postsWriteRoutes from './posts/write.js';
+import postsWriteRoutes, { PostsWriteRouteOptions } from './posts/write.js';
 import postsStatusRoutes from './posts/status.js';
 import postsImageRoutes from './posts/images.js';
 
-export default async function postsRoutes(server: FastifyInstance) {
+interface PostsRouteOptions {
+  writeRouteOptions?: PostsWriteRouteOptions;
+}
+
+export default async function postsRoutes(
+  server: FastifyInstance,
+  options: PostsRouteOptions = {}
+) {
   await server.register(postsReadRoutes);
-  await server.register(postsWriteRoutes);
+  await server.register(postsWriteRoutes, options.writeRouteOptions ?? {});
   await server.register(postsStatusRoutes);
   await server.register(postsImageRoutes);
 }

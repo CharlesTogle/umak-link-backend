@@ -1,10 +1,17 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { expireCustodySessions } from '../services/custody.js';
-import { ExpireCustodySessionsResponse } from '../types/custody.js';
+import {
+  escalateStaleAcceptedCustodyAttempts,
+  expireCustodySessions,
+} from '../services/custody.js';
+import {
+  EscalateStaleAcceptedCustodyAttemptsResponse,
+  ExpireCustodySessionsResponse,
+} from '../types/custody.js';
 import { extractBearerToken, getAuthorizationHeader } from '../utils/http-headers.js';
 
 export interface CustodyJobsRouteServices {
   expireCustodySessions: typeof expireCustodySessions;
+  escalateStaleAcceptedCustodyAttempts: typeof escalateStaleAcceptedCustodyAttempts;
 }
 
 interface CustodyJobsRouteOptions {
@@ -13,6 +20,7 @@ interface CustodyJobsRouteOptions {
 
 const defaultServices: CustodyJobsRouteServices = {
   expireCustodySessions,
+  escalateStaleAcceptedCustodyAttempts,
 };
 
 function verifySystemToken(request: FastifyRequest): boolean {
@@ -54,6 +62,32 @@ export default async function custodyJobsRoutes(
       }
 
       return services.expireCustodySessions();
+    }
+  );
+
+  server.post(
+    '/escalate-stale-accepted',
+    {
+      schema: {
+        headers: {
+          type: 'object',
+          required: ['authorization'],
+          properties: {
+            authorization: { type: 'string', minLength: 1 },
+          },
+        },
+      },
+    },
+    async (
+      request,
+      reply
+    ): Promise<EscalateStaleAcceptedCustodyAttemptsResponse | void> => {
+      if (!verifySystemToken(request)) {
+        replyUnauthorized(reply);
+        return;
+      }
+
+      return services.escalateStaleAcceptedCustodyAttempts();
     }
   );
 }

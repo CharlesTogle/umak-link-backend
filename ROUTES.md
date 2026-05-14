@@ -1,12 +1,13 @@
 # UMak-LINK Backend Routes
 
-Last updated: March 4, 2026.
+Last updated: May 14, 2026.
 
 Base URL: `http://<host>:<port>`
 
 Authentication
 - `Authorization: Bearer <jwt>` for authenticated user routes.
 - Staff/Admin routes require a JWT with `user_type` of `Staff` or `Admin`.
+- Some custody office routes are `Staff`-only and explicitly reject `Admin`.
 - Admin-only routes require `user_type` of `Admin`.
 - System jobs require `Authorization: Bearer <SYSTEM_TOKEN>`.
 
@@ -948,6 +949,38 @@ Sample response:
   "remaining": 12,
   "timed_out": false,
   "rate_limit_stopped": false
+}
+```
+
+**POST `/jobs/custody/expire-sessions`**
+Purpose: Finalize expired custody QR sessions when their retry budget is exhausted.
+
+Sample request:
+```http
+POST /jobs/custody/expire-sessions
+Authorization: Bearer <SYSTEM_TOKEN>
+```
+
+Sample response:
+```json
+{
+  "expired_count": 1
+}
+```
+
+**POST `/jobs/custody/escalate-stale-accepted`**
+Purpose: Open investigation for accepted custody handovers whose `decision_at` is older than the stale threshold and still have no Security Office receipt.
+
+Sample request:
+```http
+POST /jobs/custody/escalate-stale-accepted
+Authorization: Bearer <SYSTEM_TOKEN>
+```
+
+Sample response:
+```json
+{
+  "escalated_count": 2
 }
 ```
 

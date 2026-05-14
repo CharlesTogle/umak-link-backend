@@ -135,9 +135,25 @@ docker run -p 8080:8080 --env-file .env umak-link-backend
 - `POST /admin/audit-logs` - Insert audit log (staff)
 - `GET /admin/audit-logs` - List audit logs (admin)
 
+### Custody
+- `GET /custody/guard-posts` - List active guard posts for student handover
+- `POST /custody/attempts` - Start a student custody handover session
+- `GET /custody/sessions/:qrCodeSessionId/status` - Poll live custody session state
+- `POST /custody/sessions/:qrCodeSessionId/retry` - Retry QR issuance inside the same session
+- `POST /custody/sessions/:qrCodeSessionId/cancel` - Cancel the current student handover session
+- `GET /custody/posts/:postId/history` - Read student-facing custody history
+- `POST /guard/custody/scan` - Guard scan QR and load handover details
+- `POST /guard/custody/attempts/:custodyAttemptId/decision` - Guard accept or reject handover
+- `POST /staff/custody/security-office/receive` - Mark item as received in Security Office
+- `POST /staff/custody/investigations/open` - Open custody investigation
+- `POST /staff/custody/physical-takes/report` - Report physical take without QR acceptance
+- `POST /staff/custody/guards/notify` - Create an in-app follow-up notification for the accepted guard
+
 ### Background Jobs
 - `POST /jobs/metadata-batch` - Generate AI metadata (system)
 - `POST /jobs/pending-match` - Match lost/found items (system)
+- `POST /jobs/custody/expire-sessions` - Finalize expired custody QR sessions after retry exhaustion
+- `POST /jobs/custody/escalate-stale-accepted` - Auto-open investigation for overdue accepted handovers
 
 ### AI
 - `POST /ai/create-post-autofill` - Generate item title/description/category from image (auth required)
@@ -150,6 +166,15 @@ docker run -p 8080:8080 --env-file .env umak-link-backend
 See `.env.example` for required configuration.
 
 **Critical**: Never expose `SUPABASE_SERVICE_ROLE_KEY` to clients!
+
+Custody-related backend variables:
+
+- `SYSTEM_TOKEN`: required for all system job routes
+- `CUSTODY_AUTOMATION_STAFF_USER_ID`: required for automated stale accepted custody escalation
+- `CUSTODY_STALE_ACCEPTED_ESCALATION_HOURS`: optional, defaults to `48`
+- `CUSTODY_QR_TTL_SECONDS`: optional, defaults to `300`
+- `CUSTODY_QR_MAX_ATTEMPTS`: optional, defaults to `5`
+- `CUSTODY_SESSION_LIMIT_PER_HOUR`: optional, defaults to `2`
 
 ## Deployment
 
@@ -169,19 +194,17 @@ Set environment variables in Cloud Run console or via `--env-vars-file`.
 
 ### Scheduled Jobs
 
-Configure pg_cron in Supabase to trigger background jobs:
+Scheduled jobs are provisioned through SQL migrations, not copied from this README.
 
-```sql
--- Generate metadata every 10 minutes
-SELECT cron.schedule(
-  'metadata-batch',
-  '*/10 * * * *',
-  $$SELECT net.http_post(
-    url := 'https://your-backend-url/jobs/metadata-batch',
-    headers := '{"Authorization": "Bearer YOUR_SYSTEM_TOKEN"}'::jsonb
-  )$$
-);
-```
+Current custody cron definitions live in:
+
+- [`20260514143000_schedule_custody_stale_accepted_escalation_job.sql`](../UMak-LINK/supabase/migrations/20260514143000_schedule_custody_stale_accepted_escalation_job.sql)
+
+The stale-accepted custody escalation job depends on:
+
+- Supabase Vault secret `umak_link_backend_system_token`
+- backend env `CUSTODY_AUTOMATION_STAFF_USER_ID`
+- deployed backend route `https://umak-link-backend.onrender.com/jobs/custody/escalate-stale-accepted`
 
 ## Security
 

@@ -80,6 +80,7 @@ export interface PostRecord {
 export interface PostRecordDetails extends PostRecord {
   linked_lost_item_id: string | null;
   returned_at_local: string | null;
+  claim_processed_by_user_type?: 'User' | 'Staff' | 'Admin' | 'Guard' | null;
   accepted_by_guard_name?: string | null;
   accepted_by_guard_email?: string | null;
 }

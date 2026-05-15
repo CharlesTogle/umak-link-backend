@@ -395,6 +395,80 @@ test('GET /posts/:id/full allows staff to fetch any post', { concurrency: false 
 });
 
 test(
+  'GET /posts/:id/full includes the claim processor role for claimed items',
+  { concurrency: false },
+  async (t) => {
+    const app = Fastify();
+    const fakeSupabase = {
+      from(table: string) {
+        assert.equal(table, 'v_post_records_details');
+
+        return {
+          select(columns: string) {
+            assert.equal(columns, '*');
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        poster_id: 'user-2',
+                        item_name: 'Umbrella',
+                        claim_processed_by_name: 'Stefanie Gabion',
+                        claim_processed_by_email: 'sgabion.k12148528@umak.edu.ph',
+                        claim_processed_by_user_type: 'Guard',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+    } as never;
+
+    await app.register(postsRoutes, {
+      prefix: '/posts',
+      readRouteOptions: {
+        getSupabase: () => fakeSupabase,
+      },
+    });
+
+    setAuthSupabaseClientFactoryForTests(() =>
+      createPostsAuthSupabase('Staff', 'staff-1@umak.edu.ph')
+    );
+    t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/posts/42/full',
+      headers: {
+        authorization: `Bearer ${createToken('Staff', 'staff-1', 'staff-1@umak.edu.ph')}`,
+      },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(JSON.parse(res.body), {
+      post_id: 42,
+      poster_id: 'user-2',
+      item_name: 'Umbrella',
+      claim_processed_by_name: 'Stefanie Gabion',
+      claim_processed_by_email: 'sgabion.k12148528@umak.edu.ph',
+      claim_processed_by_user_type: 'Guard',
+    });
+
+    await app.close();
+  }
+);
+
+test(
   'GET /posts/:id/full includes the accepting guard identity for with_guard custody',
   { concurrency: false },
   async (t) => {

@@ -178,8 +178,15 @@ function serializeFcmDataValue(value: unknown): string {
 
 function isMissingColumnError(error: unknown, column: string): boolean {
   const typed = error as SupabaseErrorLike | null;
-  if (!typed) return false;
-  return typed.code === 'PGRST204' && typeof typed.message === 'string' && typed.message.includes(`'${column}'`);
+  if (!typed || typeof typed.message !== 'string') return false;
+
+  const matchesColumn =
+    typed.message.includes(`'${column}'`) ||
+    typed.message.includes(`"${column}"`) ||
+    typed.message.includes(`.${column}`) ||
+    typed.message.includes(` ${column} `);
+
+  return (typed.code === 'PGRST204' || typed.code === '42703') && matchesColumn;
 }
 
 function isNotificationRecipientRole(value: unknown): value is NotificationRecipientRole {

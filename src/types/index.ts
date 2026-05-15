@@ -1,4 +1,5 @@
 export * from './auth.js';
+export * from './claim-verification.js';
 export * from './claims.js';
 export * from './common.js';
 export * from './custody.js';

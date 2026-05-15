@@ -80,6 +80,8 @@ export interface PostRecord {
 export interface PostRecordDetails extends PostRecord {
   linked_lost_item_id: string | null;
   returned_at_local: string | null;
+  accepted_by_guard_name?: string | null;
+  accepted_by_guard_email?: string | null;
 }
 
 export interface PostListResponse {
@@ -94,4 +96,5 @@ export interface UpdatePostStatusRequest {
 
 export interface UpdateItemStatusRequest {
   status: ItemStatus;
+  discard_reason?: string;
 }

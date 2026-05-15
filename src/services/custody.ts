@@ -40,13 +40,11 @@ function parsePositiveIntEnv(value: string | undefined, fallback: number): numbe
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const DEFAULT_QR_SESSION_TTL_SECONDS = parsePositiveIntEnv(
-  process.env.CUSTODY_QR_TTL_SECONDS,
-  300
-);
-const DEFAULT_QR_SESSION_MAX_ATTEMPTS = parsePositiveIntEnv(
-  process.env.CUSTODY_QR_MAX_ATTEMPTS,
-  5
+const DEFAULT_QR_SESSION_TTL_SECONDS = parsePositiveIntEnv(process.env.CUSTODY_QR_TTL_SECONDS, 120);
+const DEFAULT_QR_SESSION_MAX_ATTEMPTS = parsePositiveIntEnv(process.env.CUSTODY_QR_MAX_ATTEMPTS, 5);
+const DEFAULT_CUSTODY_SESSION_ABSOLUTE_TTL_SECONDS = parsePositiveIntEnv(
+  process.env.CUSTODY_SESSION_ABSOLUTE_TTL_SECONDS,
+  15 * 60
 );
 const DEFAULT_CUSTODY_SESSION_LIMIT_PER_HOUR = parsePositiveIntEnv(
   process.env.CUSTODY_SESSION_LIMIT_PER_HOUR,
@@ -58,6 +56,14 @@ const DEFAULT_STALE_ACCEPTED_ESCALATION_HOURS = parsePositiveIntEnv(
 );
 const DEFAULT_AUTOMATION_STAFF_USER_ID = process.env.CUSTODY_AUTOMATION_STAFF_USER_ID ?? null;
 const CUSTODY_SESSION_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+const MANUAL_ENTRY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const MANUAL_ENTRY_CODE_LENGTH = 6;
+const MAX_MANUAL_ENTRY_CODE_GENERATION_ATTEMPTS = 10;
+const ATTEMPT_SELECT_COLUMNS =
+  'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, created_at';
+const ATTEMPT_REVIEW_SELECT_COLUMNS = `${ATTEMPT_SELECT_COLUMNS}, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at`;
+const SESSION_SELECT_COLUMNS =
+  'qr_code_session_id, custody_attempt_id, session_token_hash, manual_entry_code, status, expires_at, scanned_by_guard_id, scanned_at, closed_at';
 
 type SupabaseClientLike = ReturnType<typeof getSupabaseClient>;
 
@@ -76,6 +82,7 @@ interface LocationRow {
 interface PostCustodyAccessRow {
   post_id: number;
   item_id: string;
+  item_name?: string | null;
   poster_id: string | null;
   item_type: string | null;
   post_status: string | null;
@@ -97,6 +104,7 @@ interface AttemptRow {
   decision_by_guard_id: string | null;
   decision_at: string | null;
   closed_at: string | null;
+  created_at: string;
 }
 
 interface AttemptReviewRow extends AttemptRow {
@@ -110,6 +118,7 @@ interface SessionRow {
   qr_code_session_id: string;
   custody_attempt_id: string;
   session_token_hash: string;
+  manual_entry_code: string;
   status: 'active' | 'accepted' | 'rejected' | 'expired' | 'cancelled';
   expires_at: string;
   scanned_by_guard_id: string | null;
@@ -172,7 +181,9 @@ export interface CustodyServiceDependencies {
   getSupabase?: () => SupabaseClientLike;
   now?: () => Date;
   hashSessionToken?: (sessionToken: string) => string;
+  generateManualEntryCode?: () => string;
   qrSessionTtlSeconds?: number;
+  absoluteSessionTtlSeconds?: number;
   maxSessionAttempts?: number;
   maxSessionLoopsPerHour?: number;
   staleAcceptedEscalationHours?: number;
@@ -185,9 +196,9 @@ export interface CreateCustodyAttemptInput extends CreateCustodyAttemptRequest {
   actor: CustodyActor;
 }
 
-export interface GuardScanInput extends GuardScanRequest {
+export type GuardScanInput = GuardScanRequest & {
   actor: CustodyActor;
-}
+};
 
 export interface GuardDecisionInput extends GuardDecisionRequest {
   actor: CustodyActor;
@@ -230,8 +241,7 @@ export interface NotifyGuardInput extends NotifyGuardRequest {
   actor: CustodyActor;
 }
 
-export interface UpdateClaimedCustodyStatusInput
-  extends UpdateClaimedCustodyStatusRequest {
+export interface UpdateClaimedCustodyStatusInput extends UpdateClaimedCustodyStatusRequest {
   actor: CustodyActor;
   details?: Record<string, unknown>;
   occurred_at?: string;
@@ -241,8 +251,28 @@ function defaultHashSessionToken(sessionToken: string): string {
   return crypto.createHash('sha256').update(sessionToken).digest('hex');
 }
 
+function defaultGenerateManualEntryCode(): string {
+  const randomBytes = crypto.randomBytes(MANUAL_ENTRY_CODE_LENGTH);
+
+  return Array.from(
+    randomBytes,
+    (value) => MANUAL_ENTRY_CODE_ALPHABET[value % MANUAL_ENTRY_CODE_ALPHABET.length]
+  ).join('');
+}
+
+function normalizeManualEntryCode(manualEntryCode: string): string {
+  return manualEntryCode
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
 function isNoRowsError(error: { code?: string } | null | undefined): boolean {
   return error?.code === 'PGRST116';
+}
+
+function isUniqueConstraintError(error: { code?: string } | null | undefined): boolean {
+  return error?.code === '23505';
 }
 
 function resolveDependencies(deps?: CustodyServiceDependencies) {
@@ -250,7 +280,10 @@ function resolveDependencies(deps?: CustodyServiceDependencies) {
     getSupabase: deps?.getSupabase ?? getSupabaseClient,
     now: deps?.now ?? (() => new Date()),
     hashSessionToken: deps?.hashSessionToken ?? defaultHashSessionToken,
+    generateManualEntryCode: deps?.generateManualEntryCode ?? defaultGenerateManualEntryCode,
     qrSessionTtlSeconds: deps?.qrSessionTtlSeconds ?? DEFAULT_QR_SESSION_TTL_SECONDS,
+    absoluteSessionTtlSeconds:
+      deps?.absoluteSessionTtlSeconds ?? DEFAULT_CUSTODY_SESSION_ABSOLUTE_TTL_SECONDS,
     maxSessionAttempts: deps?.maxSessionAttempts ?? DEFAULT_QR_SESSION_MAX_ATTEMPTS,
     maxSessionLoopsPerHour: deps?.maxSessionLoopsPerHour ?? DEFAULT_CUSTODY_SESSION_LIMIT_PER_HOUR,
     staleAcceptedEscalationHours:
@@ -293,6 +326,113 @@ function getClaimedCustodyAuditAction(status: ClaimedCustodyStatus): string {
   }
 }
 
+function shouldWriteAdminAudit(actor: Pick<CustodyActor, 'user_type'>): boolean {
+  return actor.user_type !== 'User';
+}
+
+function formatAuditPostTitle(itemName: string | null | undefined, postId: number): string {
+  const normalizedItemName = itemName?.trim();
+  return normalizedItemName && normalizedItemName.length > 0
+    ? normalizedItemName
+    : `Post ${postId}`;
+}
+
+function getAuditActorRoleLabel(userType: CustodyActor['user_type']): string {
+  switch (userType) {
+    case 'Admin':
+      return 'Admin';
+    case 'Guard':
+      return 'Guard';
+    case 'Staff':
+      return 'Staff';
+    default:
+      return 'User';
+  }
+}
+
+function getClaimedCustodyStatusMessage(
+  actorLabel: string,
+  postTitle: string,
+  custodyStatus: ClaimedCustodyStatus
+): string {
+  switch (custodyStatus) {
+    case 'in_security_office':
+      return `${actorLabel} marked ${postTitle} as received in the Security Office`;
+    case 'under_investigation':
+      return `${actorLabel} marked ${postTitle} under investigation`;
+    case 'claimed_by_student':
+      return `${actorLabel} marked ${postTitle} as claimed by student`;
+  }
+}
+
+async function getAuditActorName(
+  supabase: SupabaseClientLike,
+  actor: Pick<CustodyActor, 'user_id' | 'user_type'>
+): Promise<string> {
+  const fallbackName = getAuditActorRoleLabel(actor.user_type);
+
+  try {
+    const { data, error } = await supabase
+      .from('user_table')
+      .select('user_id, user_name')
+      .eq('user_id', actor.user_id)
+      .single();
+
+    if (error || !data) {
+      logger.warn(
+        { actorUserId: actor.user_id, error },
+        'Failed to resolve audit actor name for custody log'
+      );
+      return fallbackName;
+    }
+
+    const userName = (data as UserNameRow).user_name?.trim();
+    return userName && userName.length > 0 ? userName : fallbackName;
+  } catch (error) {
+    logger.warn(
+      { actorUserId: actor.user_id, error },
+      'Exception resolving audit actor name for custody log'
+    );
+    return fallbackName;
+  }
+}
+
+async function getAuditPostTitle(
+  supabase: SupabaseClientLike,
+  postId: number,
+  fallbackItemName?: string | null
+): Promise<string> {
+  if (fallbackItemName !== undefined) {
+    return formatAuditPostTitle(fallbackItemName, postId);
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('post_public_view')
+      .select('item_name')
+      .eq('post_id', postId)
+      .single();
+
+    if (error || !data) {
+      logger.warn({ postId, error }, 'Failed to resolve custody audit post title');
+      return formatAuditPostTitle(null, postId);
+    }
+
+    return formatAuditPostTitle((data as { item_name?: string | null }).item_name ?? null, postId);
+  } catch (error) {
+    logger.warn({ postId, error }, 'Exception resolving custody audit post title');
+    return formatAuditPostTitle(null, postId);
+  }
+}
+
+async function getAuditActorLabel(
+  supabase: SupabaseClientLike,
+  actor: Pick<CustodyActor, 'user_id' | 'user_type'>
+): Promise<string> {
+  const actorName = await getAuditActorName(supabase, actor);
+  return `${getAuditActorRoleLabel(actor.user_type)} ${actorName}`;
+}
+
 async function getPostCustodyAccessRow(
   supabase: SupabaseClientLike,
   postId: number,
@@ -318,9 +458,7 @@ async function getLatestAttemptForPost(
 ): Promise<AttemptReviewRow> {
   const { data, error } = await supabase
     .from('custody_attempt_table')
-    .select(
-      'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
-    )
+    .select(ATTEMPT_REVIEW_SELECT_COLUMNS)
     .eq('post_id', postId)
     .order('attempt_number', { ascending: false })
     .limit(1)
@@ -344,9 +482,7 @@ async function getLatestAcceptedAttemptForPost(
 ): Promise<AttemptReviewRow> {
   const { data, error } = await supabase
     .from('custody_attempt_table')
-    .select(
-      'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
-    )
+    .select(ATTEMPT_REVIEW_SELECT_COLUMNS)
     .eq('post_id', postId)
     .eq('status', 'accepted')
     .order('attempt_number', { ascending: false })
@@ -365,10 +501,7 @@ async function getLatestAcceptedAttemptForPost(
   return data as AttemptReviewRow;
 }
 
-async function assertGuardUserExists(
-  supabase: SupabaseClientLike,
-  guardId: string
-): Promise<void> {
+async function assertGuardUserExists(supabase: SupabaseClientLike, guardId: string): Promise<void> {
   const { data, error } = await supabase
     .from('user_table')
     .select('user_id, user_type')
@@ -429,9 +562,7 @@ async function getStaleAcceptedAttemptsForEscalation(
 ): Promise<AttemptReviewRow[]> {
   const { data, error } = await supabase
     .from('custody_attempt_table')
-    .select(
-      'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
-    )
+    .select(ATTEMPT_REVIEW_SELECT_COLUMNS)
     .eq('status', 'accepted')
     .is('office_received_at', null)
     .is('investigation_opened_at', null)
@@ -452,9 +583,7 @@ async function getAttemptById(
 ): Promise<AttemptRow> {
   const { data, error } = await supabase
     .from('custody_attempt_table')
-    .select(
-      'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at'
-    )
+    .select(ATTEMPT_SELECT_COLUMNS)
     .eq('custody_attempt_id', custodyAttemptId)
     .single();
 
@@ -472,15 +601,36 @@ async function getSessionById(
 ): Promise<SessionRow> {
   const { data, error } = await supabase
     .from('qr_code_session_table')
-    .select(
-      'qr_code_session_id, custody_attempt_id, session_token_hash, status, expires_at, scanned_by_guard_id, scanned_at, closed_at'
-    )
+    .select(SESSION_SELECT_COLUMNS)
     .eq('qr_code_session_id', qrCodeSessionId)
     .single();
 
   if (error || !data) {
     logger.warn({ qrCodeSessionId, error }, 'QR code session not found');
     throw createHttpError('QR code session not found', 404);
+  }
+
+  return data as SessionRow;
+}
+
+async function getSessionByManualEntryCode(
+  supabase: SupabaseClientLike,
+  manualEntryCode: string
+): Promise<SessionRow> {
+  const normalizedManualEntryCode = normalizeManualEntryCode(manualEntryCode);
+
+  const { data, error } = await supabase
+    .from('qr_code_session_table')
+    .select(SESSION_SELECT_COLUMNS)
+    .eq('manual_entry_code', normalizedManualEntryCode)
+    .single();
+
+  if (error || !data) {
+    logger.warn(
+      { manualEntryCode: normalizedManualEntryCode, error },
+      'QR code session not found for manual entry code'
+    );
+    throw createHttpError('Manual entry code not found', 404);
   }
 
   return data as SessionRow;
@@ -512,6 +662,36 @@ function isSessionWindowExpired(session: SessionRow, currentTime: Date): boolean
   return new Date(session.expires_at).getTime() <= currentTime.getTime();
 }
 
+function getAbsoluteSessionDeadline(
+  attempt: Pick<AttemptRow, 'created_at'>,
+  absoluteSessionTtlSeconds: number
+): Date {
+  return new Date(new Date(attempt.created_at).getTime() + absoluteSessionTtlSeconds * 1000);
+}
+
+function isAbsoluteSessionExpired(
+  attempt: Pick<AttemptRow, 'created_at'>,
+  currentTime: Date,
+  absoluteSessionTtlSeconds: number
+): boolean {
+  return (
+    getAbsoluteSessionDeadline(attempt, absoluteSessionTtlSeconds).getTime() <=
+    currentTime.getTime()
+  );
+}
+
+function buildSessionExpirationTimestamp(
+  currentTime: Date,
+  qrSessionTtlSeconds: number,
+  attempt: Pick<AttemptRow, 'created_at'>,
+  absoluteSessionTtlSeconds: number
+): string {
+  const qrWindowDeadline = currentTime.getTime() + qrSessionTtlSeconds * 1000;
+  const absoluteDeadline = getAbsoluteSessionDeadline(attempt, absoluteSessionTtlSeconds).getTime();
+
+  return new Date(Math.min(qrWindowDeadline, absoluteDeadline)).toISOString();
+}
+
 function buildSessionRetryMetadata(
   attempt: Pick<AttemptRow, 'number_of_attempts'>,
   maxSessionAttempts: number
@@ -536,6 +716,7 @@ function buildCreateOrRetryResponse(
   return {
     custody_attempt_id: attempt.custody_attempt_id,
     qr_code_session_id: session.qr_code_session_id,
+    manual_entry_code: session.manual_entry_code,
     attempt_status: attempt.status,
     qr_status: session.status,
     custody_status: custodyStatus,
@@ -574,6 +755,7 @@ function buildSessionStatusResponse(
     custody_attempt_id: attempt.custody_attempt_id,
     post_id: attempt.post_id,
     item_id: attempt.item_id,
+    manual_entry_code: session.manual_entry_code,
     qr_status: session.status,
     attempt_status: attempt.status,
     custody_status: custodyStatus,
@@ -588,6 +770,106 @@ function buildSessionStatusResponse(
       attempt.number_of_attempts < maxSessionAttempts,
     ...buildSessionRetryMetadata(attempt, maxSessionAttempts),
   };
+}
+
+async function createSessionWithManualEntryCode(
+  supabase: SupabaseClientLike,
+  custodyAttemptId: string,
+  sessionTokenHash: string,
+  expiresAt: string,
+  generateManualEntryCode: () => string
+): Promise<SessionRow> {
+  for (
+    let attemptIndex = 0;
+    attemptIndex < MAX_MANUAL_ENTRY_CODE_GENERATION_ATTEMPTS;
+    attemptIndex += 1
+  ) {
+    const manualEntryCode = normalizeManualEntryCode(generateManualEntryCode());
+    if (manualEntryCode.length !== MANUAL_ENTRY_CODE_LENGTH) {
+      continue;
+    }
+
+    const { data, error } = await supabase
+      .from('qr_code_session_table')
+      .insert({
+        custody_attempt_id: custodyAttemptId,
+        session_token_hash: sessionTokenHash,
+        manual_entry_code: manualEntryCode,
+        status: 'active',
+        expires_at: expiresAt,
+      })
+      .select(SESSION_SELECT_COLUMNS)
+      .single();
+
+    if (!error && data) {
+      return data as SessionRow;
+    }
+
+    if (isUniqueConstraintError(error)) {
+      continue;
+    }
+
+    logger.error({ error, custodyAttemptId }, 'Failed to create QR code session');
+    throw createHttpError('Failed to create QR code session', 500);
+  }
+
+  logger.error(
+    { custodyAttemptId },
+    'Failed to generate a unique manual entry code for QR session creation'
+  );
+  throw createHttpError('Failed to create QR code session', 500);
+}
+
+async function rotateSessionManualEntryCode(
+  supabase: SupabaseClientLike,
+  session: SessionRow,
+  sessionTokenHash: string,
+  expiresAt: string,
+  generateManualEntryCode: () => string
+): Promise<string> {
+  for (
+    let attemptIndex = 0;
+    attemptIndex < MAX_MANUAL_ENTRY_CODE_GENERATION_ATTEMPTS;
+    attemptIndex += 1
+  ) {
+    const manualEntryCode = normalizeManualEntryCode(generateManualEntryCode());
+    if (manualEntryCode.length !== MANUAL_ENTRY_CODE_LENGTH) {
+      continue;
+    }
+
+    const { error } = await supabase
+      .from('qr_code_session_table')
+      .update({
+        session_token_hash: sessionTokenHash,
+        manual_entry_code: manualEntryCode,
+        status: 'active',
+        expires_at: expiresAt,
+        scanned_by_guard_id: null,
+        scanned_at: null,
+        closed_at: null,
+      })
+      .eq('qr_code_session_id', session.qr_code_session_id);
+
+    if (!error) {
+      return manualEntryCode;
+    }
+
+    if (isUniqueConstraintError(error)) {
+      continue;
+    }
+
+    logger.error(
+      { error, qrCodeSessionId: session.qr_code_session_id },
+      'Failed to rotate custody QR session'
+    );
+    throw createHttpError('Failed to retry custody handover session', 500);
+  }
+
+  logger.error(
+    { qrCodeSessionId: session.qr_code_session_id },
+    'Failed to generate a unique manual entry code for custody QR session retry'
+  );
+  throw createHttpError('Failed to retry custody handover session', 500);
 }
 
 async function insertCustodyRecords(
@@ -619,6 +901,55 @@ function assertActorOwnsReporterSession(actor: CustodyActor, posterId: string): 
   }
 }
 
+function hasHttpStatusCode(error: unknown, statusCodes: number[]): boolean {
+  return (
+    error instanceof Error &&
+    'statusCode' in error &&
+    typeof (error as { statusCode?: unknown }).statusCode === 'number' &&
+    statusCodes.includes((error as { statusCode: number }).statusCode)
+  );
+}
+
+async function assertCanReadPostCustodyHistory(
+  supabase: SupabaseClientLike,
+  actor: CustodyActor,
+  post: PostCustodyAccessRow
+): Promise<void> {
+  if (!post.poster_id) {
+    throw createHttpError('Post not found', 404);
+  }
+
+  if (actor.user_type !== 'Guard') {
+    assertCanReadReporterSession(actor, post.poster_id);
+    return;
+  }
+
+  if (
+    post.item_type !== 'found' ||
+    post.item_status !== 'unclaimed' ||
+    post.custody_status !== 'with_guard'
+  ) {
+    throw createHttpError('Forbidden', 403);
+  }
+
+  try {
+    const acceptedAttempt = await getLatestAcceptedAttemptForPost(supabase, post.post_id);
+
+    if (
+      acceptedAttempt.decision_by_guard_id !== actor.user_id ||
+      acceptedAttempt.office_received_at
+    ) {
+      throw createHttpError('Forbidden', 403);
+    }
+  } catch (error) {
+    if (hasHttpStatusCode(error, [403, 404, 409])) {
+      throw createHttpError('Forbidden', 403);
+    }
+
+    throw error;
+  }
+}
+
 async function finalizeTimedOutSession(
   supabase: SupabaseClientLike,
   session: SessionRow,
@@ -628,6 +959,7 @@ async function finalizeTimedOutSession(
   auditUserId?: string
 ): Promise<{ session: SessionRow; attempt: AttemptRow }> {
   const timestamp = currentTime.toISOString();
+  const postTitle = await getAuditPostTitle(supabase, attempt.post_id);
 
   const { error: sessionError } = await supabase
     .from('qr_code_session_table')
@@ -638,7 +970,10 @@ async function finalizeTimedOutSession(
     .eq('qr_code_session_id', session.qr_code_session_id);
 
   if (sessionError) {
-    logger.error({ error: sessionError, qrCodeSessionId: session.qr_code_session_id }, 'Failed to expire QR session');
+    logger.error(
+      { error: sessionError, qrCodeSessionId: session.qr_code_session_id },
+      'Failed to expire QR session'
+    );
     throw createHttpError('Failed to expire QR session', 500);
   }
 
@@ -651,7 +986,10 @@ async function finalizeTimedOutSession(
     .eq('custody_attempt_id', attempt.custody_attempt_id);
 
   if (attemptError) {
-    logger.error({ error: attemptError, custodyAttemptId: attempt.custody_attempt_id }, 'Failed to timeout custody attempt');
+    logger.error(
+      { error: attemptError, custodyAttemptId: attempt.custody_attempt_id },
+      'Failed to timeout custody attempt'
+    );
     throw createHttpError('Failed to timeout custody attempt', 500);
   }
 
@@ -681,6 +1019,8 @@ async function finalizeTimedOutSession(
       tableName: 'qr_code_session_table',
       recordId: session.qr_code_session_id,
       details: {
+        message: `Custody handover session expired for ${postTitle}`,
+        post_title: postTitle,
         qr_code_session_id: session.qr_code_session_id,
         custody_attempt_id: attempt.custody_attempt_id,
         post_id: attempt.post_id,
@@ -709,6 +1049,7 @@ async function resolveSessionExpiration(
   session: SessionRow,
   attempt: AttemptRow,
   currentTime: Date,
+  absoluteSessionTtlSeconds: number,
   maxSessionAttempts: number,
   auditLogger: AuditLogger,
   auditUserId?: string
@@ -722,8 +1063,12 @@ async function resolveSessionExpiration(
     session.status === 'active' &&
     attempt.status === 'open' &&
     isSessionWindowExpired(session, currentTime);
+  const absoluteSessionExpired =
+    session.status === 'active' &&
+    attempt.status === 'open' &&
+    isAbsoluteSessionExpired(attempt, currentTime, absoluteSessionTtlSeconds);
 
-  if (!currentWindowExpired) {
+  if (!currentWindowExpired && !absoluteSessionExpired) {
     return {
       session,
       attempt,
@@ -732,7 +1077,7 @@ async function resolveSessionExpiration(
     };
   }
 
-  if (attempt.number_of_attempts < maxSessionAttempts) {
+  if (!absoluteSessionExpired && attempt.number_of_attempts < maxSessionAttempts) {
     return {
       session,
       attempt,
@@ -813,10 +1158,11 @@ export async function createCustodyAttempt(
     getSupabase,
     now,
     hashSessionToken,
+    generateManualEntryCode,
     qrSessionTtlSeconds,
+    absoluteSessionTtlSeconds,
     maxSessionAttempts,
     maxSessionLoopsPerHour,
-    auditLogger,
   } = resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
@@ -842,7 +1188,11 @@ export async function createCustodyAttempt(
     throw createHttpError('Custody flow only applies to found items', 400);
   }
 
-  if (postRow.post_status === 'deleted' || postRow.post_status === 'rejected' || postRow.post_status === 'fraud') {
+  if (
+    postRow.post_status === 'deleted' ||
+    postRow.post_status === 'rejected' ||
+    postRow.post_status === 'fraud'
+  ) {
     throw createHttpError('Post cannot start custody handover', 409);
   }
 
@@ -850,9 +1200,13 @@ export async function createCustodyAttempt(
     postRow.custody_status === 'with_guard' ||
     postRow.custody_status === 'in_security_office' ||
     postRow.custody_status === 'claimed_by_student' ||
-    postRow.custody_status === 'under_investigation'
+    postRow.custody_status === 'under_investigation' ||
+    postRow.custody_status === 'discarded'
   ) {
-    throw createHttpError('Post cannot start a new custody handover from its current custody state', 409);
+    throw createHttpError(
+      'Post cannot start a new custody handover from its current custody state',
+      409
+    );
   }
 
   const { data: existingOpenAttempt, error: existingOpenAttemptError } = await supabase
@@ -863,7 +1217,10 @@ export async function createCustodyAttempt(
     .maybeSingle();
 
   if (existingOpenAttemptError && !isNoRowsError(existingOpenAttemptError)) {
-    logger.error({ postId: input.post_id, error: existingOpenAttemptError }, 'Failed to check existing custody attempt');
+    logger.error(
+      { postId: input.post_id, error: existingOpenAttemptError },
+      'Failed to check existing custody attempt'
+    );
     throw createHttpError('Failed to create custody attempt', 500);
   }
 
@@ -890,7 +1247,10 @@ export async function createCustodyAttempt(
   }
 
   if ((recentSessionLoopCount ?? 0) >= maxSessionLoopsPerHour) {
-    throw createHttpError('Too many custody handover sessions started for this post. Try again later.', 429);
+    throw createHttpError(
+      'Too many custody handover sessions started for this post. Try again later.',
+      429
+    );
   }
 
   const { data: guardPost, error: guardPostError } = await supabase
@@ -901,7 +1261,10 @@ export async function createCustodyAttempt(
     .single();
 
   if (guardPostError || !guardPost) {
-    logger.warn({ guardPostId: input.guard_post_id, error: guardPostError }, 'Guard post not found for custody attempt');
+    logger.warn(
+      { guardPostId: input.guard_post_id, error: guardPostError },
+      'Guard post not found for custody attempt'
+    );
     throw createHttpError('Guard post not found', 404);
   }
 
@@ -932,11 +1295,15 @@ export async function createCustodyAttempt(
     .limit(1);
 
   if (lastAttemptError) {
-    logger.error({ error: lastAttemptError, postId: input.post_id }, 'Failed to resolve custody attempt number');
+    logger.error(
+      { error: lastAttemptError, postId: input.post_id },
+      'Failed to resolve custody attempt number'
+    );
     throw createHttpError('Failed to create custody attempt', 500);
   }
 
-  const nextAttemptNumber = ((lastAttempts?.[0] as { attempt_number?: number } | undefined)?.attempt_number ?? 0) + 1;
+  const nextAttemptNumber =
+    ((lastAttempts?.[0] as { attempt_number?: number } | undefined)?.attempt_number ?? 0) + 1;
 
   const { data: createdAttempt, error: attemptError } = await supabase
     .from('custody_attempt_table')
@@ -953,34 +1320,36 @@ export async function createCustodyAttempt(
         initiated_via: 'backend_route',
       },
     })
-    .select(
-      'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at'
-    )
+    .select(ATTEMPT_SELECT_COLUMNS)
     .single();
 
   if (attemptError || !createdAttempt) {
-    logger.error({ error: attemptError, postId: input.post_id }, 'Failed to create custody attempt');
+    logger.error(
+      { error: attemptError, postId: input.post_id },
+      'Failed to create custody attempt'
+    );
     throw createHttpError('Failed to create custody attempt', 500);
   }
 
-  const expiresAt = new Date(currentTime.getTime() + qrSessionTtlSeconds * 1000).toISOString();
+  const expiresAt = buildSessionExpirationTimestamp(
+    currentTime,
+    qrSessionTtlSeconds,
+    createdAttempt as AttemptRow,
+    absoluteSessionTtlSeconds
+  );
   const tokenHash = hashSessionToken(input.session_token);
+  let createdSession: SessionRow;
 
-  const { data: createdSession, error: sessionError } = await supabase
-    .from('qr_code_session_table')
-    .insert({
-      custody_attempt_id: (createdAttempt as AttemptRow).custody_attempt_id,
-      session_token_hash: tokenHash,
-      status: 'active',
-      expires_at: expiresAt,
-    })
-    .select(
-      'qr_code_session_id, custody_attempt_id, session_token_hash, status, expires_at, scanned_by_guard_id, scanned_at, closed_at'
-    )
-    .single();
-
-  if (sessionError || !createdSession) {
-    logger.error({ error: sessionError, postId: input.post_id }, 'Failed to create QR code session');
+  try {
+    createdSession = await createSessionWithManualEntryCode(
+      supabase,
+      (createdAttempt as AttemptRow).custody_attempt_id,
+      tokenHash,
+      expiresAt,
+      generateManualEntryCode
+    );
+  } catch (error) {
+    logger.error({ error, postId: input.post_id }, 'Failed to create QR code session');
 
     const { error: rollbackError } = await supabase
       .from('custody_attempt_table')
@@ -997,7 +1366,7 @@ export async function createCustodyAttempt(
       );
     }
 
-    throw createHttpError('Failed to create QR code session', 500);
+    throw error;
   }
 
   await insertCustodyRecords(supabase, [
@@ -1020,37 +1389,23 @@ export async function createCustodyAttempt(
       post_id: input.post_id,
       item_id: postRow.item_id,
       custody_attempt_id: (createdAttempt as AttemptRow).custody_attempt_id,
-      qr_code_session_id: (createdSession as SessionRow).qr_code_session_id,
+      qr_code_session_id: createdSession.qr_code_session_id,
       guard_post_id: input.guard_post_id,
       actor_user_id: input.actor.user_id,
       record_type: 'qr_generated',
       visible_to_poster: true,
       details: {
         expires_at: expiresAt,
+        manual_entry_code: createdSession.manual_entry_code,
       },
       occurred_at: timestamp,
     },
   ]);
 
-  await auditLogger({
-    userId: input.actor.user_id,
-    actionType: 'custody_attempt_created',
-    tableName: 'custody_attempt_table',
-    recordId: (createdAttempt as AttemptRow).custody_attempt_id,
-    details: {
-      post_id: input.post_id,
-      item_id: postRow.item_id,
-      qr_code_session_id: (createdSession as SessionRow).qr_code_session_id,
-      guard_post_id: input.guard_post_id,
-      attempt_number: nextAttemptNumber,
-      number_of_attempts: 1,
-    },
-  });
-
   const custodyStatus = await getItemCustodyStatus(supabase, postRow.item_id);
 
   return buildCreateOrRetryResponse(
-    createdSession as SessionRow,
+    createdSession,
     createdAttempt as AttemptRow,
     custodyStatus,
     maxSessionAttempts
@@ -1061,7 +1416,8 @@ export async function getCustodySessionStatus(
   input: GetCustodySessionStatusInput,
   deps?: CustodyServiceDependencies
 ): Promise<CustodySessionStatusResponse> {
-  const { getSupabase, now, maxSessionAttempts, auditLogger } = resolveDependencies(deps);
+  const { getSupabase, now, absoluteSessionTtlSeconds, maxSessionAttempts, auditLogger } =
+    resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
 
@@ -1075,9 +1431,10 @@ export async function getCustodySessionStatus(
     session,
     attempt,
     currentTime,
+    absoluteSessionTtlSeconds,
     maxSessionAttempts,
     auditLogger,
-    input.actor.user_id
+    shouldWriteAdminAudit(input.actor) ? input.actor.user_id : undefined
   );
   session = expirationResult.session;
   attempt = expirationResult.attempt;
@@ -1097,7 +1454,16 @@ export async function retryCustodySession(
   input: RetryCustodySessionInput,
   deps?: CustodyServiceDependencies
 ): Promise<RetryCustodySessionResponse> {
-  const { getSupabase, now, hashSessionToken, qrSessionTtlSeconds, maxSessionAttempts, auditLogger } = resolveDependencies(deps);
+  const {
+    getSupabase,
+    now,
+    hashSessionToken,
+    generateManualEntryCode,
+    qrSessionTtlSeconds,
+    absoluteSessionTtlSeconds,
+    maxSessionAttempts,
+    auditLogger,
+  } = resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
 
@@ -1111,6 +1477,7 @@ export async function retryCustodySession(
     session,
     attempt,
     currentTime,
+    absoluteSessionTtlSeconds,
     maxSessionAttempts,
     auditLogger,
     input.actor.user_id
@@ -1118,7 +1485,11 @@ export async function retryCustodySession(
   session = expirationResult.session;
   attempt = expirationResult.attempt;
 
-  if (expirationResult.finalizedTimeout || attempt.status !== 'open' || session.status !== 'active') {
+  if (
+    expirationResult.finalizedTimeout ||
+    attempt.status !== 'open' ||
+    session.status !== 'active'
+  ) {
     throw createHttpError('Custody handover session is no longer active', 409);
   }
 
@@ -1131,7 +1502,12 @@ export async function retryCustodySession(
     throw createHttpError('Custody handover session is no longer retryable', 409);
   }
 
-  const nextExpiresAt = new Date(currentTime.getTime() + qrSessionTtlSeconds * 1000).toISOString();
+  const nextExpiresAt = buildSessionExpirationTimestamp(
+    currentTime,
+    qrSessionTtlSeconds,
+    attempt,
+    absoluteSessionTtlSeconds
+  );
   const nextTokenHash = hashSessionToken(input.session_token);
 
   const { error: attemptUpdateError } = await supabase
@@ -1142,25 +1518,24 @@ export async function retryCustodySession(
     .eq('custody_attempt_id', attempt.custody_attempt_id);
 
   if (attemptUpdateError) {
-    logger.error({ error: attemptUpdateError, custodyAttemptId: attempt.custody_attempt_id }, 'Failed to increment custody retry attempts');
+    logger.error(
+      { error: attemptUpdateError, custodyAttemptId: attempt.custody_attempt_id },
+      'Failed to increment custody retry attempts'
+    );
     throw createHttpError('Failed to retry custody handover session', 500);
   }
 
-  const { error: sessionUpdateError } = await supabase
-    .from('qr_code_session_table')
-    .update({
-      session_token_hash: nextTokenHash,
-      status: 'active',
-      expires_at: nextExpiresAt,
-      scanned_by_guard_id: null,
-      scanned_at: null,
-      closed_at: null,
-    })
-    .eq('qr_code_session_id', session.qr_code_session_id);
+  let nextManualEntryCode: string;
 
-  if (sessionUpdateError) {
-    logger.error({ error: sessionUpdateError, qrCodeSessionId: session.qr_code_session_id }, 'Failed to rotate custody QR session');
-
+  try {
+    nextManualEntryCode = await rotateSessionManualEntryCode(
+      supabase,
+      session,
+      nextTokenHash,
+      nextExpiresAt,
+      generateManualEntryCode
+    );
+  } catch (error) {
     const { error: rollbackError } = await supabase
       .from('custody_attempt_table')
       .update({
@@ -1175,22 +1550,8 @@ export async function retryCustodySession(
       );
     }
 
-    throw createHttpError('Failed to retry custody handover session', 500);
+    throw error;
   }
-
-  await auditLogger({
-    userId: input.actor.user_id,
-    actionType: 'custody_session_retried',
-    tableName: 'qr_code_session_table',
-    recordId: session.qr_code_session_id,
-    details: {
-      qr_code_session_id: session.qr_code_session_id,
-      custody_attempt_id: attempt.custody_attempt_id,
-      post_id: attempt.post_id,
-      item_id: attempt.item_id,
-      number_of_attempts: nextNumberOfAttempts,
-    },
-  });
 
   const updatedAttempt: AttemptRow = {
     ...attempt,
@@ -1199,6 +1560,7 @@ export async function retryCustodySession(
   const updatedSession: SessionRow = {
     ...session,
     session_token_hash: nextTokenHash,
+    manual_entry_code: nextManualEntryCode,
     status: 'active',
     expires_at: nextExpiresAt,
     scanned_by_guard_id: null,
@@ -1220,7 +1582,8 @@ export async function cancelCustodySession(
   input: CancelCustodySessionInput,
   deps?: CustodyServiceDependencies
 ): Promise<CancelCustodySessionResponse> {
-  const { getSupabase, now, maxSessionAttempts, auditLogger } = resolveDependencies(deps);
+  const { getSupabase, now, absoluteSessionTtlSeconds, maxSessionAttempts, auditLogger } =
+    resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
 
@@ -1234,9 +1597,10 @@ export async function cancelCustodySession(
     session,
     attempt,
     currentTime,
+    absoluteSessionTtlSeconds,
     maxSessionAttempts,
     auditLogger,
-    input.actor.user_id
+    shouldWriteAdminAudit(input.actor) ? input.actor.user_id : undefined
   );
   session = expirationResult.session;
   attempt = expirationResult.attempt;
@@ -1250,7 +1614,11 @@ export async function cancelCustodySession(
     );
   }
 
-  if (expirationResult.finalizedTimeout || attempt.status !== 'open' || session.status !== 'active') {
+  if (
+    expirationResult.finalizedTimeout ||
+    attempt.status !== 'open' ||
+    session.status !== 'active'
+  ) {
     throw createHttpError('Custody handover session is no longer cancellable', 409);
   }
 
@@ -1265,7 +1633,10 @@ export async function cancelCustodySession(
     .eq('qr_code_session_id', session.qr_code_session_id);
 
   if (sessionUpdateError) {
-    logger.error({ error: sessionUpdateError, qrCodeSessionId: session.qr_code_session_id }, 'Failed to cancel custody QR session');
+    logger.error(
+      { error: sessionUpdateError, qrCodeSessionId: session.qr_code_session_id },
+      'Failed to cancel custody QR session'
+    );
     throw createHttpError('Failed to cancel custody handover session', 500);
   }
 
@@ -1278,7 +1649,10 @@ export async function cancelCustodySession(
     .eq('custody_attempt_id', attempt.custody_attempt_id);
 
   if (attemptUpdateError) {
-    logger.error({ error: attemptUpdateError, custodyAttemptId: attempt.custody_attempt_id }, 'Failed to cancel custody attempt');
+    logger.error(
+      { error: attemptUpdateError, custodyAttemptId: attempt.custody_attempt_id },
+      'Failed to cancel custody attempt'
+    );
 
     const { error: rollbackError } = await supabase
       .from('qr_code_session_table')
@@ -1316,19 +1690,6 @@ export async function cancelCustodySession(
     },
   ]);
 
-  await auditLogger({
-    userId: input.actor.user_id,
-    actionType: 'custody_attempt_cancelled',
-    tableName: 'custody_attempt_table',
-    recordId: attempt.custody_attempt_id,
-    details: {
-      post_id: attempt.post_id,
-      item_id: attempt.item_id,
-      custody_attempt_id: attempt.custody_attempt_id,
-      qr_code_session_id: session.qr_code_session_id,
-    },
-  });
-
   const cancelledSession: SessionRow = {
     ...session,
     status: 'cancelled',
@@ -1354,24 +1715,13 @@ export async function getStudentCustodyHistory(
 ): Promise<StudentCustodyHistoryResponse> {
   const { getSupabase } = resolveDependencies(deps);
   const supabase = getSupabase();
+  const postRow = await getPostCustodyAccessRow(
+    supabase,
+    input.post_id,
+    'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status, submission_date'
+  );
 
-  const { data: post, error: postError } = await supabase
-    .from('post_public_view')
-    .select('post_id, item_id, poster_id, post_status, custody_status, submission_date')
-    .eq('post_id', input.post_id)
-    .single();
-
-  if (postError || !post) {
-    logger.warn({ postId: input.post_id, error: postError }, 'Post not found for student custody history');
-    throw createHttpError('Post not found', 404);
-  }
-
-  const postRow = post as PostCustodyAccessRow;
-  if (!postRow.poster_id) {
-    throw createHttpError('Post not found', 404);
-  }
-
-  assertCanReadReporterSession(input.actor, postRow.poster_id);
+  await assertCanReadPostCustodyHistory(supabase, input.actor, postRow);
 
   const { data: historyRows, error: historyError } = await supabase
     .from('custody_record_table')
@@ -1383,7 +1733,10 @@ export async function getStudentCustodyHistory(
     .order('occurred_at', { ascending: true });
 
   if (historyError) {
-    logger.error({ error: historyError, postId: input.post_id }, 'Failed to fetch student custody history');
+    logger.error(
+      { error: historyError, postId: input.post_id },
+      'Failed to fetch student custody history'
+    );
     throw createHttpError('Failed to fetch custody history', 500);
   }
 
@@ -1394,16 +1747,20 @@ export async function getStudentCustodyHistory(
     .order('attempt_number', { ascending: true });
 
   if (attemptsError) {
-    logger.error({ error: attemptsError, postId: input.post_id }, 'Failed to fetch custody attempts for history');
+    logger.error(
+      { error: attemptsError, postId: input.post_id },
+      'Failed to fetch custody attempts for history'
+    );
     throw createHttpError('Failed to fetch custody history', 500);
   }
 
   const attemptRows = (attempts ?? []) as Array<
-    Pick<AttemptRow, 'custody_attempt_id' | 'attempt_number' | 'handover_image_id' | 'guard_post_id'>
+    Pick<
+      AttemptRow,
+      'custody_attempt_id' | 'attempt_number' | 'handover_image_id' | 'guard_post_id'
+    >
   >;
-  const attemptMap = new Map(
-    attemptRows.map((attempt) => [attempt.custody_attempt_id, attempt])
-  );
+  const attemptMap = new Map(attemptRows.map((attempt) => [attempt.custody_attempt_id, attempt]));
 
   const handoverImageIds = Array.from(
     new Set(attemptRows.map((attempt) => attempt.handover_image_id))
@@ -1416,7 +1773,10 @@ export async function getStudentCustodyHistory(
       .in('item_image_id', handoverImageIds);
 
     if (handoverImagesError) {
-      logger.error({ error: handoverImagesError, postId: input.post_id }, 'Failed to fetch handover images for history');
+      logger.error(
+        { error: handoverImagesError, postId: input.post_id },
+        'Failed to fetch handover images for history'
+      );
       throw createHttpError('Failed to fetch custody history', 500);
     }
 
@@ -1448,14 +1808,15 @@ export async function getStudentCustodyHistory(
       .in('guard_post_id', guardPostIds);
 
     if (guardPostsError) {
-      logger.error({ error: guardPostsError, postId: input.post_id }, 'Failed to fetch guard posts for history');
+      logger.error(
+        { error: guardPostsError, postId: input.post_id },
+        'Failed to fetch guard posts for history'
+      );
       throw createHttpError('Failed to fetch custody history', 500);
     }
 
     const guardPostRows = (guardPosts ?? []) as GuardPostRow[];
-    guardPostMap = new Map(
-      guardPostRows.map((guardPost) => [guardPost.guard_post_id, guardPost])
-    );
+    guardPostMap = new Map(guardPostRows.map((guardPost) => [guardPost.guard_post_id, guardPost]));
 
     const locationIds = Array.from(
       new Set(guardPostRows.map((guardPost) => guardPost.location_id))
@@ -1467,7 +1828,10 @@ export async function getStudentCustodyHistory(
         .in('location_id', locationIds);
 
       if (locationsError) {
-        logger.error({ error: locationsError, postId: input.post_id }, 'Failed to fetch guard post locations for history');
+        logger.error(
+          { error: locationsError, postId: input.post_id },
+          'Failed to fetch guard post locations for history'
+        );
         throw createHttpError('Failed to fetch custody history', 500);
       }
 
@@ -1486,8 +1850,8 @@ export async function getStudentCustodyHistory(
         const guardId =
           typeof record.details?.guard_id === 'string' ? record.details.guard_id : null;
 
-        return [record.actor_user_id, guardId].filter(
-          (actorUserId): actorUserId is string => Boolean(actorUserId)
+        return [record.actor_user_id, guardId].filter((actorUserId): actorUserId is string =>
+          Boolean(actorUserId)
         );
       })
     )
@@ -1500,7 +1864,10 @@ export async function getStudentCustodyHistory(
       .in('user_id', actorIds);
 
     if (actorsError) {
-      logger.error({ error: actorsError, postId: input.post_id }, 'Failed to fetch custody actor names for history');
+      logger.error(
+        { error: actorsError, postId: input.post_id },
+        'Failed to fetch custody actor names for history'
+      );
       throw createHttpError('Failed to fetch custody history', 500);
     }
 
@@ -1531,26 +1898,26 @@ export async function getStudentCustodyHistory(
 
   for (const record of custodyHistoryRows) {
     const attempt = record.custody_attempt_id
-      ? attemptMap.get(record.custody_attempt_id) ?? null
+      ? (attemptMap.get(record.custody_attempt_id) ?? null)
       : null;
     const guardPostId = record.guard_post_id ?? attempt?.guard_post_id ?? null;
-    const guardPost = guardPostId ? guardPostMap.get(guardPostId) ?? null : null;
+    const guardPost = guardPostId ? (guardPostMap.get(guardPostId) ?? null) : null;
     const guardPostName = guardPost?.guard_post_name ?? null;
-    const fullLocationName = guardPost
-      ? locationMap.get(guardPost.location_id) ?? null
-      : null;
+    const fullLocationName = guardPost ? (locationMap.get(guardPost.location_id) ?? null) : null;
     const locationLabel = fullLocationName ?? guardPostName ?? 'selected guard post';
     const handoverImageUrl = attempt
-      ? handoverImageMap.get(attempt.handover_image_id) ?? null
+      ? (handoverImageMap.get(attempt.handover_image_id) ?? null)
       : null;
     const actorName = record.actor_user_id
-      ? actorNameMap.get(record.actor_user_id) ?? null
+      ? (actorNameMap.get(record.actor_user_id) ?? null)
       : null;
     const reportedGuardId =
       typeof record.details?.guard_id === 'string' ? record.details.guard_id : null;
-    const reportedGuardName = reportedGuardId
-      ? actorNameMap.get(reportedGuardId) ?? null
-      : null;
+    const reportedGuardName = reportedGuardId ? (actorNameMap.get(reportedGuardId) ?? null) : null;
+    const decisionReason =
+      typeof record.details?.decision_reason === 'string' ? record.details.decision_reason : null;
+    const discardReason =
+      typeof record.details?.discard_reason === 'string' ? record.details.discard_reason : null;
 
     let eventType: StudentCustodyHistoryEntry['event_type'] | null = null;
     let message: string | null = null;
@@ -1592,6 +1959,10 @@ export async function getStudentCustodyHistory(
         eventType = 'claimed_by_student';
         message = 'Item has been claimed by the student';
         break;
+      case 'item_discarded':
+        eventType = 'discarded';
+        message = 'Item was discarded by staff';
+        break;
       default:
         break;
     }
@@ -1615,6 +1986,8 @@ export async function getStudentCustodyHistory(
       handover_image_url: handoverImageUrl,
       actor_user_id: record.actor_user_id,
       actor_name: actorName,
+      decision_reason: decisionReason,
+      discard_reason: discardReason,
     });
   }
 
@@ -1624,9 +1997,11 @@ export async function getStudentCustodyHistory(
 
   const latestHistoryEvent = history[history.length - 1] ?? null;
   const derivedCustodyStatus =
-    latestHistoryEvent?.event_type === 'claimed_by_student'
-      ? 'claimed_by_student'
-      : postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id));
+    latestHistoryEvent?.event_type === 'discarded'
+      ? 'discarded'
+      : latestHistoryEvent?.event_type === 'claimed_by_student'
+        ? 'claimed_by_student'
+        : (postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id)));
 
   return {
     post_id: postRow.post_id,
@@ -1646,7 +2021,11 @@ export async function markPostReceivedInSecurityOffice(
   const currentTime = now();
   const timestamp = currentTime.toISOString();
 
-  const postRow = await getPostCustodyAccessRow(supabase, input.post_id);
+  const postRow = await getPostCustodyAccessRow(
+    supabase,
+    input.post_id,
+    'post_id, item_id, item_name, poster_id, item_type, post_status, custody_status'
+  );
   if (postRow.item_type !== 'found') {
     throw createHttpError('Custody flow only applies to found items', 400);
   }
@@ -1672,7 +2051,11 @@ export async function markPostReceivedInSecurityOffice(
 
   if (updateError) {
     logger.error(
-      { error: updateError, postId: input.post_id, custodyAttemptId: acceptedAttempt.custody_attempt_id },
+      {
+        error: updateError,
+        postId: input.post_id,
+        custodyAttemptId: acceptedAttempt.custody_attempt_id,
+      },
       'Failed to mark custody attempt as received in security office'
     );
     throw createHttpError('Failed to mark item as received in the Security Office', 500);
@@ -1695,12 +2078,17 @@ export async function markPostReceivedInSecurityOffice(
     },
   ]);
 
+  const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const postTitle = await getAuditPostTitle(supabase, acceptedAttempt.post_id, postRow.item_name);
+
   await auditLogger({
     userId: input.actor.user_id,
     actionType: 'custody_security_office_received',
     tableName: 'custody_attempt_table',
     recordId: acceptedAttempt.custody_attempt_id,
     details: {
+      message: `${actorLabel} received ${postTitle} in the Security Office`,
+      post_title: postTitle,
       post_id: acceptedAttempt.post_id,
       item_id: acceptedAttempt.item_id,
       custody_attempt_id: acceptedAttempt.custody_attempt_id,
@@ -1724,7 +2112,11 @@ export async function openCustodyInvestigation(
   const currentTime = now();
   const timestamp = currentTime.toISOString();
 
-  const postRow = await getPostCustodyAccessRow(supabase, input.post_id);
+  const postRow = await getPostCustodyAccessRow(
+    supabase,
+    input.post_id,
+    'post_id, item_id, item_name, poster_id, item_type, post_status, custody_status'
+  );
   if (postRow.item_type !== 'found') {
     throw createHttpError('Custody flow only applies to found items', 400);
   }
@@ -1750,7 +2142,11 @@ export async function openCustodyInvestigation(
 
   if (updateError) {
     logger.error(
-      { error: updateError, postId: input.post_id, custodyAttemptId: latestAttempt.custody_attempt_id },
+      {
+        error: updateError,
+        postId: input.post_id,
+        custodyAttemptId: latestAttempt.custody_attempt_id,
+      },
       'Failed to open custody investigation'
     );
     throw createHttpError('Failed to open custody investigation', 500);
@@ -1773,12 +2169,17 @@ export async function openCustodyInvestigation(
     },
   ]);
 
+  const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const postTitle = await getAuditPostTitle(supabase, latestAttempt.post_id, postRow.item_name);
+
   await auditLogger({
     userId: input.actor.user_id,
     actionType: 'custody_investigation_opened',
     tableName: 'custody_attempt_table',
     recordId: latestAttempt.custody_attempt_id,
     details: {
+      message: `${actorLabel} opened a custody investigation for ${postTitle}`,
+      post_title: postTitle,
       post_id: latestAttempt.post_id,
       item_id: latestAttempt.item_id,
       custody_attempt_id: latestAttempt.custody_attempt_id,
@@ -1808,7 +2209,7 @@ export async function updateClaimedCustodyStatus(
   const postRow = await getPostCustodyAccessRow(
     supabase,
     input.post_id,
-    'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status'
+    'post_id, item_id, item_name, poster_id, item_type, post_status, item_status, custody_status'
   );
 
   if (postRow.item_type !== 'found') {
@@ -1819,7 +2220,8 @@ export async function updateClaimedCustodyStatus(
     throw createHttpError('Only claimed found items can update custody status', 409);
   }
 
-  const currentCustodyStatus = postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id));
+  const currentCustodyStatus =
+    postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id));
   if (currentCustodyStatus === input.custody_status) {
     return {
       post_id: postRow.post_id,
@@ -1836,7 +2238,12 @@ export async function updateClaimedCustodyStatus(
 
   if (updateError) {
     logger.error(
-      { error: updateError, postId: input.post_id, itemId: postRow.item_id, custodyStatus: input.custody_status },
+      {
+        error: updateError,
+        postId: input.post_id,
+        itemId: postRow.item_id,
+        custodyStatus: input.custody_status,
+      },
       'Failed to update claimed item custody status'
     );
     throw createHttpError('Failed to update claimed item custody status', 500);
@@ -1861,12 +2268,17 @@ export async function updateClaimedCustodyStatus(
     },
   ]);
 
+  const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const postTitle = await getAuditPostTitle(supabase, postRow.post_id, postRow.item_name);
+
   await auditLogger({
     userId: input.actor.user_id,
     actionType: getClaimedCustodyAuditAction(input.custody_status),
     tableName: 'item_table',
     recordId: postRow.item_id,
     details: {
+      message: getClaimedCustodyStatusMessage(actorLabel, postTitle, input.custody_status),
+      post_title: postTitle,
       post_id: postRow.post_id,
       item_id: postRow.item_id,
       old_custody_status: currentCustodyStatus,
@@ -1891,7 +2303,11 @@ export async function reportPhysicalTake(
   const currentTime = now();
   const timestamp = currentTime.toISOString();
 
-  const postRow = await getPostCustodyAccessRow(supabase, input.post_id);
+  const postRow = await getPostCustodyAccessRow(
+    supabase,
+    input.post_id,
+    'post_id, item_id, item_name, poster_id, item_type, post_status, custody_status'
+  );
   if (postRow.item_type !== 'found') {
     throw createHttpError('Custody flow only applies to found items', 400);
   }
@@ -1924,12 +2340,17 @@ export async function reportPhysicalTake(
     },
   ]);
 
+  const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const postTitle = await getAuditPostTitle(supabase, latestAttempt.post_id, postRow.item_name);
+
   await auditLogger({
     userId: input.actor.user_id,
     actionType: 'custody_physical_take_reported',
     tableName: 'custody_record_table',
     recordId: latestAttempt.custody_attempt_id,
     details: {
+      message: `${actorLabel} reported a physical take for ${postTitle}`,
+      post_title: postTitle,
       post_id: latestAttempt.post_id,
       item_id: latestAttempt.item_id,
       custody_attempt_id: latestAttempt.custody_attempt_id,
@@ -1955,7 +2376,11 @@ export async function notifyGuardForCustodyFollowUp(
   const currentTime = now();
   const timestamp = currentTime.toISOString();
 
-  const postRow = await getPostCustodyAccessRow(supabase, input.post_id);
+  const postRow = await getPostCustodyAccessRow(
+    supabase,
+    input.post_id,
+    'post_id, item_id, item_name, poster_id, item_type, post_status, custody_status'
+  );
   if (postRow.item_type !== 'found') {
     throw createHttpError('Custody flow only applies to found items', 400);
   }
@@ -1973,7 +2398,8 @@ export async function notifyGuardForCustodyFollowUp(
     user_id: acceptedAttempt.decision_by_guard_id,
     title: 'Custody Follow-up Needed',
     body: 'A staff member requested follow-up for a custody handover that has not yet been received in the Security Office.',
-    description: 'Please review the accepted custody handover and coordinate delivery to the Security Office.',
+    description:
+      'Please review the accepted custody handover and coordinate delivery to the Security Office.',
     type: 'custody_guard_follow_up',
     data: {
       post_id: acceptedAttempt.post_id,
@@ -1989,12 +2415,17 @@ export async function notifyGuardForCustodyFollowUp(
     throw createHttpError('Failed to create guard follow-up notification', 500);
   }
 
+  const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const postTitle = await getAuditPostTitle(supabase, acceptedAttempt.post_id, postRow.item_name);
+
   await auditLogger({
     userId: input.actor.user_id,
     actionType: 'custody_guard_notification_requested',
     tableName: 'custody_attempt_table',
     recordId: acceptedAttempt.custody_attempt_id,
     details: {
+      message: `${actorLabel} requested guard follow-up for ${postTitle}`,
+      post_title: postTitle,
       post_id: acceptedAttempt.post_id,
       item_id: acceptedAttempt.item_id,
       custody_attempt_id: acceptedAttempt.custody_attempt_id,
@@ -2017,11 +2448,21 @@ export async function scanCustodySession(
   input: GuardScanInput,
   deps?: CustodyServiceDependencies
 ): Promise<GuardScanResponse> {
-  const { getSupabase, now, hashSessionToken, maxSessionAttempts, auditLogger } = resolveDependencies(deps);
+  const {
+    getSupabase,
+    now,
+    hashSessionToken,
+    absoluteSessionTtlSeconds,
+    maxSessionAttempts,
+    auditLogger,
+  } = resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
 
-  let session = await getSessionById(supabase, input.qr_code_session_id);
+  const isManualEntryCodeScan = 'manual_entry_code' in input;
+  let session = isManualEntryCodeScan
+    ? await getSessionByManualEntryCode(supabase, input.manual_entry_code)
+    : await getSessionById(supabase, input.qr_code_session_id);
   let attempt = await getAttemptById(supabase, session.custody_attempt_id);
 
   const expirationResult = await resolveSessionExpiration(
@@ -2029,6 +2470,7 @@ export async function scanCustodySession(
     session,
     attempt,
     currentTime,
+    absoluteSessionTtlSeconds,
     maxSessionAttempts,
     auditLogger
   );
@@ -2043,16 +2485,19 @@ export async function scanCustodySession(
     throw createHttpError('QR session is no longer active', 409);
   }
 
-  const providedHash = hashSessionToken(input.session_token);
-  if (providedHash !== session.session_token_hash) {
-    throw createHttpError('Invalid QR session token', 401);
+  if (!isManualEntryCodeScan) {
+    const providedHash = hashSessionToken(input.session_token);
+    if (providedHash !== session.session_token_hash) {
+      throw createHttpError('Invalid QR session token', 401);
+    }
   }
 
   if (session.scanned_by_guard_id && session.scanned_by_guard_id !== input.actor.user_id) {
     throw createHttpError('QR session already scanned by another guard', 409);
   }
 
-  if (!session.scanned_by_guard_id) {
+  const isFirstGuardScan = !session.scanned_by_guard_id;
+  if (isFirstGuardScan) {
     const scannedAt = currentTime.toISOString();
     const { error: scanUpdateError } = await supabase
       .from('qr_code_session_table')
@@ -2063,7 +2508,10 @@ export async function scanCustodySession(
       .eq('qr_code_session_id', session.qr_code_session_id);
 
     if (scanUpdateError) {
-      logger.error({ error: scanUpdateError, qrCodeSessionId: session.qr_code_session_id }, 'Failed to mark QR session as scanned');
+      logger.error(
+        { error: scanUpdateError, qrCodeSessionId: session.qr_code_session_id },
+        'Failed to mark QR session as scanned'
+      );
       throw createHttpError('Failed to scan QR session', 500);
     }
 
@@ -2084,18 +2532,6 @@ export async function scanCustodySession(
       },
     ]);
 
-    await auditLogger({
-      userId: input.actor.user_id,
-      actionType: 'custody_qr_scanned',
-      tableName: 'qr_code_session_table',
-      recordId: session.qr_code_session_id,
-      details: {
-        custody_attempt_id: attempt.custody_attempt_id,
-        post_id: attempt.post_id,
-        item_id: attempt.item_id,
-      },
-    });
-
     session = {
       ...session,
       scanned_by_guard_id: input.actor.user_id,
@@ -2110,7 +2546,10 @@ export async function scanCustodySession(
     .single();
 
   if (handoverImageError || !handoverImage) {
-    logger.error({ error: handoverImageError, handoverImageId: attempt.handover_image_id }, 'Failed to fetch handover image');
+    logger.error(
+      { error: handoverImageError, handoverImageId: attempt.handover_image_id },
+      'Failed to fetch handover image'
+    );
     throw createHttpError('Failed to fetch handover details', 500);
   }
 
@@ -2121,19 +2560,50 @@ export async function scanCustodySession(
     .single();
 
   if (guardPostError || !guardPost) {
-    logger.error({ error: guardPostError, guardPostId: attempt.guard_post_id }, 'Failed to fetch guard post details');
+    logger.error(
+      { error: guardPostError, guardPostId: attempt.guard_post_id },
+      'Failed to fetch guard post details'
+    );
     throw createHttpError('Failed to fetch guard handover details', 500);
   }
 
   const { data: postDetails, error: postDetailsError } = await supabase
     .from('post_public_view')
-    .select('post_id, item_id, item_name, item_description, item_image_url, category, last_seen_at, last_seen_location, submission_date')
+    .select(
+      'post_id, item_id, item_name, item_description, item_image_url, category, last_seen_at, last_seen_location, submission_date'
+    )
     .eq('post_id', attempt.post_id)
     .single();
 
   if (postDetailsError || !postDetails) {
-    logger.error({ error: postDetailsError, postId: attempt.post_id }, 'Failed to fetch guard-visible post details');
+    logger.error(
+      { error: postDetailsError, postId: attempt.post_id },
+      'Failed to fetch guard-visible post details'
+    );
     throw createHttpError('Failed to fetch post details', 500);
+  }
+
+  if (isFirstGuardScan) {
+    const actorLabel = await getAuditActorLabel(supabase, input.actor);
+    const postTitle = await getAuditPostTitle(
+      supabase,
+      attempt.post_id,
+      (postDetails as GuardPostDetailsRow).item_name
+    );
+
+    await auditLogger({
+      userId: input.actor.user_id,
+      actionType: 'custody_qr_scanned',
+      tableName: 'qr_code_session_table',
+      recordId: session.qr_code_session_id,
+      details: {
+        message: `${actorLabel} scanned the custody QR for ${postTitle}`,
+        post_title: postTitle,
+        custody_attempt_id: attempt.custody_attempt_id,
+        post_id: attempt.post_id,
+        item_id: attempt.item_id,
+      },
+    });
   }
 
   const custodyStatus = await getItemCustodyStatus(supabase, attempt.item_id);
@@ -2164,7 +2634,8 @@ export async function decideCustodyAttempt(
   input: GuardDecisionInput,
   deps?: CustodyServiceDependencies
 ): Promise<GuardDecisionResponse> {
-  const { getSupabase, now, maxSessionAttempts, auditLogger } = resolveDependencies(deps);
+  const { getSupabase, now, absoluteSessionTtlSeconds, maxSessionAttempts, auditLogger } =
+    resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
   const decisionAt = currentTime.toISOString();
@@ -2181,6 +2652,7 @@ export async function decideCustodyAttempt(
     session,
     attempt,
     currentTime,
+    absoluteSessionTtlSeconds,
     maxSessionAttempts,
     auditLogger
   );
@@ -2218,7 +2690,10 @@ export async function decideCustodyAttempt(
     .eq('custody_attempt_id', attempt.custody_attempt_id);
 
   if (attemptUpdateError) {
-    logger.error({ error: attemptUpdateError, custodyAttemptId: attempt.custody_attempt_id }, 'Failed to update custody attempt decision');
+    logger.error(
+      { error: attemptUpdateError, custodyAttemptId: attempt.custody_attempt_id },
+      'Failed to update custody attempt decision'
+    );
     throw createHttpError('Failed to save guard decision', 500);
   }
 
@@ -2233,7 +2708,10 @@ export async function decideCustodyAttempt(
     .eq('qr_code_session_id', session.qr_code_session_id);
 
   if (sessionUpdateError) {
-    logger.error({ error: sessionUpdateError, qrCodeSessionId: session.qr_code_session_id }, 'Failed to update QR session decision');
+    logger.error(
+      { error: sessionUpdateError, qrCodeSessionId: session.qr_code_session_id },
+      'Failed to update QR session decision'
+    );
     throw createHttpError('Failed to save guard decision', 500);
   }
 
@@ -2255,12 +2733,17 @@ export async function decideCustodyAttempt(
     },
   ]);
 
+  const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const postTitle = await getAuditPostTitle(supabase, attempt.post_id);
+
   await auditLogger({
     userId: input.actor.user_id,
     actionType: 'custody_attempt_decided',
     tableName: 'custody_attempt_table',
     recordId: attempt.custody_attempt_id,
     details: {
+      message: `${actorLabel} ${input.decision} ${postTitle}`,
+      post_title: postTitle,
       qr_code_session_id: session.qr_code_session_id,
       post_id: attempt.post_id,
       item_id: attempt.item_id,
@@ -2283,17 +2766,15 @@ export async function decideCustodyAttempt(
 export async function expireCustodySessions(
   deps?: CustodyServiceDependencies
 ): Promise<ExpireCustodySessionsResponse> {
-  const { getSupabase, now, maxSessionAttempts, auditLogger } = resolveDependencies(deps);
+  const { getSupabase, now, absoluteSessionTtlSeconds, maxSessionAttempts, auditLogger } =
+    resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
 
   const { data: activeSessions, error } = await supabase
     .from('qr_code_session_table')
-    .select(
-      'qr_code_session_id, custody_attempt_id, session_token_hash, status, expires_at, scanned_by_guard_id, scanned_at, closed_at'
-    )
-    .eq('status', 'active')
-    .lte('expires_at', currentTime.toISOString());
+    .select(SESSION_SELECT_COLUMNS)
+    .eq('status', 'active');
 
   if (error) {
     logger.error({ error }, 'Failed to fetch expired custody sessions');
@@ -2308,6 +2789,7 @@ export async function expireCustodySessions(
       row,
       attempt,
       currentTime,
+      absoluteSessionTtlSeconds,
       maxSessionAttempts,
       auditLogger
     );
@@ -2325,13 +2807,8 @@ export async function expireCustodySessions(
 export async function escalateStaleAcceptedCustodyAttempts(
   deps?: CustodyServiceDependencies
 ): Promise<EscalateStaleAcceptedCustodyAttemptsResponse> {
-  const {
-    getSupabase,
-    now,
-    staleAcceptedEscalationHours,
-    automationStaffUserId,
-    auditLogger,
-  } = resolveDependencies(deps);
+  const { getSupabase, now, staleAcceptedEscalationHours, automationStaffUserId, auditLogger } =
+    resolveDependencies(deps);
   const supabase = getSupabase();
   const currentTime = now();
   const timestamp = currentTime.toISOString();
@@ -2389,12 +2866,17 @@ export async function escalateStaleAcceptedCustodyAttempts(
 
   await Promise.all(
     staleAttempts.map(async (attempt) => {
+      const actorLabel = await getAuditActorLabel(supabase, automationActor);
+      const postTitle = await getAuditPostTitle(supabase, attempt.post_id);
+
       await auditLogger({
         userId: automationActor.user_id,
         actionType: 'custody_investigation_auto_opened',
         tableName: 'custody_attempt_table',
         recordId: attempt.custody_attempt_id,
         details: {
+          message: `${actorLabel} auto-opened a custody investigation for ${postTitle}`,
+          post_title: postTitle,
           post_id: attempt.post_id,
           item_id: attempt.item_id,
           custody_attempt_id: attempt.custody_attempt_id,

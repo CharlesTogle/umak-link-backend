@@ -10,6 +10,7 @@ import logger, { loggerOptions } from './utils/logger.js';
 import authRoutes from './routes/auth.js';
 import postsRoutes from './routes/posts.js';
 import claimsRoutes from './routes/claims.js';
+import claimVerificationRoutes from './routes/claim-verification.js';
 import fraudReportsRoutes from './routes/fraud-reports.js';
 import searchRoutes from './routes/search.js';
 import notificationsRoutes from './routes/notifications.js';
@@ -118,6 +119,7 @@ server.get('/health', async () => {
 await server.register(authRoutes, { prefix: '/auth' });
 await server.register(postsRoutes, { prefix: '/posts' });
 await server.register(claimsRoutes, { prefix: '/claims' });
+await server.register(claimVerificationRoutes, { prefix: '/claims/verification-sessions' });
 await server.register(fraudReportsRoutes, { prefix: '/fraud-reports' });
 await server.register(searchRoutes, { prefix: '/search' });
 await server.register(notificationsRoutes, { prefix: '/notifications' });

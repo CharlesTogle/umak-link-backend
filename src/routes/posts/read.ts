@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../../services/supabase.js';
 import { isStaffOrAdmin, requireAuth, syncAuthoritativeUser } from '../../middleware/auth.js';
+import { canGuardAccessClaimReview } from '../../services/claim-verification.js';
 import { PostListResponse, PostRecord } from '../../types/posts.js';
 import { createHttpError } from '../../utils/http-error.js';
 import logger from '../../utils/logger.js';
@@ -37,6 +38,11 @@ function normalizeClaimedCustodyStatuses<T extends { item_status?: string | null
 
 export interface PostsReadRouteOptions {
   getSupabase?: () => SupabaseClientLike;
+  canGuardAccessClaimReview?: typeof canGuardAccessClaimReview;
+}
+
+function isNoRowsError(error: { code?: string } | null | undefined): boolean {
+  return error?.code === 'PGRST116';
 }
 
 async function attachPosterProfileUrls<T extends { poster_id?: string | null }>(
@@ -82,11 +88,91 @@ async function getPostAccessRecord(supabase: SupabaseClientLike, postId: number)
   return data;
 }
 
+async function attachAcceptedGuardDetails<
+  T extends { post_id?: number | string | null; custody_status?: string | null },
+>(
+  supabase: SupabaseClientLike,
+  post: T
+): Promise<T & { accepted_by_guard_name?: string | null; accepted_by_guard_email?: string | null }> {
+  if (post.custody_status !== 'with_guard') {
+    return post;
+  }
+
+  const normalizedPostId =
+    typeof post.post_id === 'string' ? Number.parseInt(post.post_id, 10) : post.post_id;
+
+  if (!normalizedPostId || Number.isNaN(normalizedPostId)) {
+    return {
+      ...post,
+      accepted_by_guard_name: null,
+      accepted_by_guard_email: null,
+    };
+  }
+
+  const { data: acceptedAttempt, error: acceptedAttemptError } = await supabase
+    .from('custody_attempt_table')
+    .select('decision_by_guard_id')
+    .eq('post_id', normalizedPostId)
+    .eq('status', 'accepted')
+    .order('attempt_number', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (acceptedAttemptError && !isNoRowsError(acceptedAttemptError)) {
+    logger.error(
+      { error: acceptedAttemptError, postId: normalizedPostId },
+      'Failed to fetch accepted guard for post details'
+    );
+    return {
+      ...post,
+      accepted_by_guard_name: null,
+      accepted_by_guard_email: null,
+    };
+  }
+
+  if (!acceptedAttempt?.decision_by_guard_id) {
+    return {
+      ...post,
+      accepted_by_guard_name: null,
+      accepted_by_guard_email: null,
+    };
+  }
+
+  const { data: guardUser, error: guardUserError } = await supabase
+    .from('user_table')
+    .select('user_id, user_name, email')
+    .eq('user_id', acceptedAttempt.decision_by_guard_id)
+    .maybeSingle();
+
+  if (guardUserError && !isNoRowsError(guardUserError)) {
+    logger.error(
+      {
+        error: guardUserError,
+        postId: normalizedPostId,
+        guardUserId: acceptedAttempt.decision_by_guard_id,
+      },
+      'Failed to fetch accepted guard identity for post details'
+    );
+    return {
+      ...post,
+      accepted_by_guard_name: null,
+      accepted_by_guard_email: null,
+    };
+  }
+
+  return {
+    ...post,
+    accepted_by_guard_name: guardUser?.user_name ?? null,
+    accepted_by_guard_email: guardUser?.email ?? null,
+  };
+}
+
 export default async function postsReadRoutes(
   server: FastifyInstance,
   options: PostsReadRouteOptions = {}
 ) {
   const getSupabase = options.getSupabase ?? getSupabaseClient;
+  const canGuardAccess = options.canGuardAccessClaimReview ?? canGuardAccessClaimReview;
 
   // GET /posts - Comprehensive post listing with filtering
   server.get<{
@@ -365,7 +451,7 @@ export default async function postsReadRoutes(
     return normalizeClaimedCustodyStatus(enriched ?? post);
   });
 
-  // GET /posts/:id/full - Get full post details (staff/admin or post owner)
+  // GET /posts/:id/full - Get full post details (staff/admin, post owner, or accepted guard)
   server.get<{ Params: { id: string } }>(
     '/:id/full',
     {
@@ -385,13 +471,16 @@ export default async function postsReadRoutes(
       }
 
       if (!isStaffOrAdmin(request.user.user_type)) {
-        if (request.user.user_type !== 'User') {
-          throw createHttpError('Forbidden', 403);
-        }
-
-        const postAccessRecord = await getPostAccessRecord(supabase, postId);
-        if (postAccessRecord.poster_id !== request.user.user_id) {
-          throw createHttpError('Forbidden', 403);
+        if (request.user.user_type === 'Guard') {
+          const canAccess = await canGuardAccess(postId, request.user.user_id);
+          if (!canAccess) {
+            throw createHttpError('Forbidden', 403);
+          }
+        } else {
+          const postAccessRecord = await getPostAccessRecord(supabase, postId);
+          if (postAccessRecord.poster_id !== request.user.user_id) {
+            throw createHttpError('Forbidden', 403);
+          }
         }
       }
 
@@ -406,7 +495,8 @@ export default async function postsReadRoutes(
         throw new Error('Post not found');
       }
 
-      return normalizeClaimedCustodyStatus(post);
+      const normalizedPost = normalizeClaimedCustodyStatus(post);
+      return attachAcceptedGuardDetails(supabase, normalizedPost);
     }
   );
 

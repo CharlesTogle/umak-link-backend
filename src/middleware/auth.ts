@@ -274,6 +274,24 @@ export async function requireGuard(request: FastifyRequest, reply: FastifyReply)
   }
 }
 
+export async function requireGuardOrStaffOrAdmin(
+  request: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  await requireAuth(request, reply);
+
+  if (reply.sent) return;
+  const isSynced = await syncAuthoritativeUser(request);
+  if (!isSynced) {
+    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    return;
+  }
+
+  if (!request.user || !isGuardOrStaffOrAdmin(request.user.user_type)) {
+    reply.status(403).send({ error: 'Forbidden', message: 'Guard, staff, or admin access required' });
+  }
+}
+
 // Helper functions matching DB role helpers
 export function isStaff(userType: string): boolean {
   return userType === 'Staff';

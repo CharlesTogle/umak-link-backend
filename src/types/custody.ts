@@ -7,7 +7,8 @@ export type CustodyStatus =
   | 'with_guard'
   | 'in_security_office'
   | 'claimed_by_student'
-  | 'under_investigation';
+  | 'under_investigation'
+  | 'discarded';
 
 export type ClaimedCustodyStatus =
   | 'in_security_office'
@@ -40,7 +41,8 @@ export type StudentCustodyHistoryEventType =
   | 'attempt_cancelled'
   | 'under_investigation'
   | 'physical_take_reported'
-  | 'claimed_by_student';
+  | 'claimed_by_student'
+  | 'discarded';
 
 export interface CustodyActor {
   user_id: string;
@@ -73,6 +75,7 @@ export interface CustodySessionRetryMetadata {
 export interface CreateCustodyAttemptResponse extends CustodySessionRetryMetadata {
   custody_attempt_id: string;
   qr_code_session_id: string;
+  manual_entry_code: string;
   attempt_status: CustodyAttemptStatus;
   qr_status: QrCodeSessionStatus;
   custody_status: CustodyStatus;
@@ -84,6 +87,7 @@ export interface CustodySessionStatusResponse extends CustodySessionRetryMetadat
   custody_attempt_id: string;
   post_id: number;
   item_id: string;
+  manual_entry_code: string;
   qr_status: QrCodeSessionStatus;
   attempt_status: CustodyAttemptStatus;
   custody_status: CustodyStatus;
@@ -101,6 +105,7 @@ export interface RetryCustodySessionRequest {
 export interface RetryCustodySessionResponse extends CustodySessionRetryMetadata {
   qr_code_session_id: string;
   custody_attempt_id: string;
+  manual_entry_code: string;
   attempt_status: CustodyAttemptStatus;
   qr_status: QrCodeSessionStatus;
   custody_status: CustodyStatus;
@@ -116,10 +121,18 @@ export interface CancelCustodySessionResponse {
   cancelled_at: string;
 }
 
-export interface GuardScanRequest {
+export interface GuardManualEntryCodeScanRequest {
+  manual_entry_code: string;
+}
+
+export interface GuardQrPayloadScanRequest {
   qr_code_session_id: string;
   session_token: string;
 }
+
+export type GuardScanRequest =
+  | GuardManualEntryCodeScanRequest
+  | GuardQrPayloadScanRequest;
 
 export interface GuardScanResponse {
   qr_code_session_id: string;
@@ -232,6 +245,8 @@ export interface StudentCustodyHistoryEntry {
   handover_image_url: string | null;
   actor_user_id: string | null;
   actor_name: string | null;
+  decision_reason?: string | null;
+  discard_reason?: string | null;
 }
 
 export interface StudentCustodyHistoryResponse {

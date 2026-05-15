@@ -20,7 +20,7 @@ function buildPlaceholderImageHash(params: { posterId: string; itemType: string;
 async function getPostAccessRecord(supabase: ReturnType<typeof getSupabaseClient>, postId: number) {
   const { data, error } = await supabase
     .from('post_public_view')
-    .select('poster_id, post_status, item_status, item_id, item_name, poster_name')
+    .select('poster_id, post_status, item_status, item_id, item_name, poster_name, custody_status')
     .eq('post_id', postId)
     .single();
 
@@ -136,7 +136,11 @@ function assertUserCanEditPost(post: { post_status: string | null }) {
   }
 }
 
-function assertUserCanDeletePost(post: { post_status: string | null; item_status: string | null }) {
+function assertUserCanDeletePost(post: {
+  post_status: string | null;
+  item_status: string | null;
+  custody_status?: string | null;
+}) {
   const canDelete =
     post.item_status === 'unclaimed' ||
     post.item_status === 'lost' ||
@@ -145,6 +149,10 @@ function assertUserCanDeletePost(post: { post_status: string | null; item_status
 
   if (!canDelete || post.post_status === 'accepted') {
     throw createHttpError('Users can only delete pending or rejected posts with unclaimed or lost items', 403);
+  }
+
+  if (post.custody_status !== null && post.custody_status !== undefined && post.custody_status !== 'with_reporter') {
+    throw createHttpError('Users can only delete posts while custody is with reporter', 403);
   }
 }
 

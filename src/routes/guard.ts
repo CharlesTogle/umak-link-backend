@@ -1,17 +1,20 @@
 import { FastifyInstance } from 'fastify';
 import { requireGuard } from '../middleware/auth.js';
 import { decideCustodyAttempt, scanCustodySession } from '../services/custody.js';
+import { listGuardActiveClaimReviews } from '../services/claim-verification.js';
 import {
   GuardDecisionRequest,
   GuardDecisionResponse,
   GuardScanRequest,
   GuardScanResponse,
 } from '../types/custody.js';
+import type { GuardActiveClaimReviewsResponse } from '../types/claim-verification.js';
 import { createHttpError } from '../utils/http-error.js';
 
 export interface GuardRouteServices {
   scanCustodySession: typeof scanCustodySession;
   decideCustodyAttempt: typeof decideCustodyAttempt;
+  listGuardActiveClaimReviews: typeof listGuardActiveClaimReviews;
 }
 
 interface GuardRouteOptions {
@@ -21,6 +24,7 @@ interface GuardRouteOptions {
 const defaultServices: GuardRouteServices = {
   scanCustodySession,
   decideCustodyAttempt,
+  listGuardActiveClaimReviews,
 };
 
 export default async function guardRoutes(
@@ -29,19 +33,47 @@ export default async function guardRoutes(
 ) {
   const services = options.services ?? defaultServices;
 
+  server.get(
+    '/reviews/active',
+    {
+      preHandler: [requireGuard],
+    },
+    async (request): Promise<GuardActiveClaimReviewsResponse> => {
+      if (!request.user) {
+        throw createHttpError('Unauthorized', 401);
+      }
+
+      return services.listGuardActiveClaimReviews({
+        actor: request.user,
+      });
+    }
+  );
+
   server.post<{ Body: GuardScanRequest }>(
     '/custody/scan',
     {
       preHandler: [requireGuard],
       schema: {
         body: {
-          type: 'object',
-          required: ['qr_code_session_id', 'session_token'],
-          properties: {
-            qr_code_session_id: { type: 'string', minLength: 1 },
-            session_token: { type: 'string', minLength: 1 },
-          },
-          additionalProperties: false,
+          oneOf: [
+            {
+              type: 'object',
+              required: ['manual_entry_code'],
+              properties: {
+                manual_entry_code: { type: 'string', minLength: 1 },
+              },
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              required: ['qr_code_session_id', 'session_token'],
+              properties: {
+                qr_code_session_id: { type: 'string', minLength: 1 },
+                session_token: { type: 'string', minLength: 1 },
+              },
+              additionalProperties: false,
+            },
+          ],
         },
       },
     },

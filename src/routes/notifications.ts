@@ -21,10 +21,31 @@ type UnreadNotificationRow = {
   type?: string | null;
 };
 
+type NotificationsRouteSupabaseClient = Pick<ReturnType<typeof getSupabaseClient>, 'from'>;
+
+interface NotificationsRouteServices {
+  getSupabaseClient: () => NotificationsRouteSupabaseClient;
+}
+
+interface NotificationsRouteOptions {
+  services?: Partial<NotificationsRouteServices>;
+}
+
+const defaultServices: NotificationsRouteServices = {
+  getSupabaseClient,
+};
+
 function isMissingColumnError(error: unknown, column: string): boolean {
   const typed = error as SupabaseErrorLike | null;
-  if (!typed) return false;
-  return typed.code === 'PGRST204' && typeof typed.message === 'string' && typed.message.includes(`'${column}'`);
+  if (!typed || typeof typed.message !== 'string') return false;
+
+  const matchesColumn =
+    typed.message.includes(`'${column}'`) ||
+    typed.message.includes(`"${column}"`) ||
+    typed.message.includes(`.${column}`) ||
+    typed.message.includes(` ${column} `);
+
+  return (typed.code === 'PGRST204' || typed.code === '42703') && matchesColumn;
 }
 
 function normalizeNotificationId(value: string): string | number {
@@ -71,7 +92,15 @@ function isSelfAuthoredAnnouncement(
   );
 }
 
-export default async function notificationsRoutes(server: FastifyInstance) {
+export default async function notificationsRoutes(
+  server: FastifyInstance,
+  options: NotificationsRouteOptions = {}
+) {
+  const services: NotificationsRouteServices = {
+    ...defaultServices,
+    ...options.services,
+  };
+
   // POST /notifications/send - Create and send notification
   server.post<{ Body: SendNotificationRequest }>(
     '/send',
@@ -137,7 +166,7 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       preHandler: [requireAuth],
     },
     async (request): Promise<{ notifications: NotificationRecord[] }> => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const userId = request.user?.user_id;
 
       let response = await supabase
@@ -190,12 +219,12 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       preHandler: [requireAuth],
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const userId = request.user?.user_id;
 
       const primaryUnreadQuery = await supabase
         .from('notification_table')
-        .select('notification_id, sent_to, user_id, sent_by, type')
+        .select('notification_id, sent_to, sent_by, type')
         .eq('sent_to', userId)
         .eq('is_read', false);
 
@@ -246,7 +275,7 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       preHandler: [requireAuth],
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const notificationId = normalizeNotificationId(request.params.id);
       const userId = request.user?.user_id;
 
@@ -288,7 +317,7 @@ export default async function notificationsRoutes(server: FastifyInstance) {
       preHandler: [requireAuth],
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const notificationId = normalizeNotificationId(request.params.id);
       const userId = request.user?.user_id;
 

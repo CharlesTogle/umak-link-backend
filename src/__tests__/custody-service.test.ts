@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createCustodyAttempt,
   escalateStaleAcceptedCustodyAttempts,
+  getStudentCustodyHistory,
   notifyGuardForCustodyFollowUp,
   updateClaimedCustodyStatus,
 } from '../services/custody.js';
@@ -20,11 +21,634 @@ const baseInput = {
   },
 };
 
+test('getStudentCustodyHistory includes guard decision notes in poster-visible history', async () => {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status, submission_date'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'accepted',
+                        item_status: 'unclaimed',
+                        custody_status: 'with_reporter',
+                        submission_date: '2026-05-14T09:00:00.000Z',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_record_table') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'custody_record_id, post_id, item_id, custody_attempt_id, qr_code_session_id, guard_post_id, actor_user_id, record_type, details, occurred_at'
+            );
+
+            return {
+              eq(column: string, value: number | boolean) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  eq(nextColumn: string, nextValue: boolean) {
+                    assert.equal(nextColumn, 'visible_to_poster');
+                    assert.equal(nextValue, true);
+
+                    return {
+                      order(orderColumn: string, options: { ascending: boolean }) {
+                        assert.equal(orderColumn, 'occurred_at');
+                        assert.deepEqual(options, { ascending: true });
+
+                        return Promise.resolve({
+                          data: [
+                            {
+                              custody_record_id: 'history-1',
+                              post_id: 42,
+                              item_id: 'item-1',
+                              custody_attempt_id: 'attempt-1',
+                              qr_code_session_id: 'session-1',
+                              guard_post_id: 'guard-post-1',
+                              actor_user_id: 'guard-1',
+                              record_type: 'guard_rejected',
+                              details: {
+                                decision: 'rejected',
+                                decision_reason: 'hello test optional reason',
+                              },
+                              occurred_at: '2026-05-14T09:15:00.000Z',
+                            },
+                          ],
+                          error: null,
+                        });
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_attempt_table') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'custody_attempt_id, attempt_number, handover_image_id, guard_post_id'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  order(orderColumn: string, options: { ascending: boolean }) {
+                    assert.equal(orderColumn, 'attempt_number');
+                    assert.deepEqual(options, { ascending: true });
+
+                    return Promise.resolve({
+                      data: [
+                        {
+                          custody_attempt_id: 'attempt-1',
+                          attempt_number: 1,
+                          handover_image_id: 99,
+                          guard_post_id: 'guard-post-1',
+                        },
+                      ],
+                      error: null,
+                    });
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_image_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'item_image_id, image_link');
+
+            return {
+              in(column: string, values: number[]) {
+                assert.equal(column, 'item_image_id');
+                assert.deepEqual(values, [99]);
+
+                return Promise.resolve({
+                  data: [
+                    {
+                      item_image_id: 99,
+                      image_link: 'https://example.com/handover.webp',
+                    },
+                  ],
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'guard_post_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'guard_post_id, guard_post_name, location_id, is_active');
+
+            return {
+              in(column: string, values: string[]) {
+                assert.equal(column, 'guard_post_id');
+                assert.deepEqual(values, ['guard-post-1']);
+
+                return Promise.resolve({
+                  data: [
+                    {
+                      guard_post_id: 'guard-post-1',
+                      guard_post_name: 'Academic Building 1',
+                      location_id: 17,
+                      is_active: true,
+                    },
+                  ],
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'location_lookup') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'location_id, full_location_name');
+
+            return {
+              in(column: string, values: number[]) {
+                assert.equal(column, 'location_id');
+                assert.deepEqual(values, [17]);
+
+                return Promise.resolve({
+                  data: [
+                    {
+                      location_id: 17,
+                      full_location_name: 'Academic Building 1',
+                    },
+                  ],
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'user_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'user_id, user_name');
+
+            return {
+              in(column: string, values: string[]) {
+                assert.equal(column, 'user_id');
+                assert.deepEqual(values, ['guard-1']);
+
+                return Promise.resolve({
+                  data: [
+                    {
+                      user_id: 'guard-1',
+                      user_name: 'Guard Stefanie Gabion',
+                    },
+                  ],
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  const response = await getStudentCustodyHistory(
+    {
+      post_id: 42,
+      actor: {
+        user_id: 'user-1',
+        email: 'user-1@umak.edu.ph',
+        user_type: 'User',
+      },
+    },
+    {
+      getSupabase: () => fakeSupabase,
+    }
+  );
+
+  assert.deepEqual(response.history, [
+    {
+      history_id: 'item-reported-42',
+      event_type: 'item_reported',
+      source_record_type: null,
+      message: 'Item reported in Umak Link',
+      occurred_at: '2026-05-14T09:00:00.000Z',
+      custody_attempt_id: null,
+      qr_code_session_id: null,
+      attempt_number: null,
+      guard_post_id: null,
+      guard_post_name: null,
+      full_location_name: null,
+      handover_image_url: null,
+      actor_user_id: 'user-1',
+      actor_name: null,
+    },
+    {
+      history_id: 'history-1',
+      event_type: 'guard_rejected',
+      source_record_type: 'guard_rejected',
+      message: 'Guard Guard Stefanie Gabion has rejected the handover',
+      occurred_at: '2026-05-14T09:15:00.000Z',
+      custody_attempt_id: 'attempt-1',
+      qr_code_session_id: 'session-1',
+      attempt_number: 1,
+      guard_post_id: 'guard-post-1',
+      guard_post_name: 'Academic Building 1',
+      full_location_name: 'Academic Building 1',
+      handover_image_url: 'https://example.com/handover.webp',
+      actor_user_id: 'guard-1',
+      actor_name: 'Guard Stefanie Gabion',
+      decision_reason: 'hello test optional reason',
+      discard_reason: null,
+    },
+  ]);
+});
+
+test('getStudentCustodyHistory allows the accepted guard to read tracking history', async () => {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status, submission_date'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'pending',
+                        item_status: 'unclaimed',
+                        custody_status: 'with_guard',
+                        submission_date: '2026-05-14T09:00:00.000Z',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_attempt_table') {
+        return {
+          select(columns: string) {
+            if (
+              columns ===
+              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, created_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
+            ) {
+              return {
+                eq(column: string, value: number | string) {
+                  assert.equal(column, 'post_id');
+                  assert.equal(value, 42);
+
+                  return {
+                    eq(nextColumn: string, nextValue: string) {
+                      assert.equal(nextColumn, 'status');
+                      assert.equal(nextValue, 'accepted');
+
+                      return {
+                        order(orderColumn: string, options: { ascending: boolean }) {
+                          assert.equal(orderColumn, 'attempt_number');
+                          assert.deepEqual(options, { ascending: false });
+
+                          return {
+                            limit(limitValue: number) {
+                              assert.equal(limitValue, 1);
+
+                              return {
+                                async maybeSingle() {
+                                  return {
+                                    data: {
+                                      custody_attempt_id: 'attempt-1',
+                                      post_id: 42,
+                                      item_id: 'item-1',
+                                      poster_id: 'user-1',
+                                      guard_post_id: 'guard-post-1',
+                                      handover_image_id: 99,
+                                      attempt_number: 1,
+                                      number_of_attempts: 1,
+                                      status: 'accepted',
+                                      decision_by_guard_id: 'guard-1',
+                                      decision_at: '2026-05-14T09:15:00.000Z',
+                                      closed_at: '2026-05-14T09:15:00.000Z',
+                                      created_at: '2026-05-14T09:05:00.000Z',
+                                      office_received_by_staff_id: null,
+                                      office_received_at: null,
+                                      investigation_opened_by: null,
+                                      investigation_opened_at: null,
+                                    },
+                                    error: null,
+                                  };
+                                },
+                              };
+                            },
+                          };
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            }
+
+            assert.equal(
+              columns,
+              'custody_attempt_id, attempt_number, handover_image_id, guard_post_id'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  order(orderColumn: string, options: { ascending: boolean }) {
+                    assert.equal(orderColumn, 'attempt_number');
+                    assert.deepEqual(options, { ascending: true });
+
+                    return Promise.resolve({
+                      data: [],
+                      error: null,
+                    });
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_record_table') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'custody_record_id, post_id, item_id, custody_attempt_id, qr_code_session_id, guard_post_id, actor_user_id, record_type, details, occurred_at'
+            );
+
+            return {
+              eq(column: string, value: number | boolean) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  eq(nextColumn: string, nextValue: boolean) {
+                    assert.equal(nextColumn, 'visible_to_poster');
+                    assert.equal(nextValue, true);
+
+                    return {
+                      order(orderColumn: string, options: { ascending: boolean }) {
+                        assert.equal(orderColumn, 'occurred_at');
+                        assert.deepEqual(options, { ascending: true });
+
+                        return Promise.resolve({
+                          data: [],
+                          error: null,
+                        });
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  const response = await getStudentCustodyHistory(
+    {
+      post_id: 42,
+      actor: {
+        user_id: 'guard-1',
+        email: 'guard-1@umak.edu.ph',
+        user_type: 'Guard',
+      },
+    },
+    {
+      getSupabase: () => fakeSupabase,
+    }
+  );
+
+  assert.deepEqual(response.history, [
+    {
+      history_id: 'item-reported-42',
+      event_type: 'item_reported',
+      source_record_type: null,
+      message: 'Item reported in Umak Link',
+      occurred_at: '2026-05-14T09:00:00.000Z',
+      custody_attempt_id: null,
+      qr_code_session_id: null,
+      attempt_number: null,
+      guard_post_id: null,
+      guard_post_name: null,
+      full_location_name: null,
+      handover_image_url: null,
+      actor_user_id: 'user-1',
+      actor_name: null,
+    },
+  ]);
+});
+
+test('getStudentCustodyHistory still rejects guards who do not own the active review', async () => {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status, submission_date'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'pending',
+                        item_status: 'unclaimed',
+                        custody_status: 'with_guard',
+                        submission_date: '2026-05-14T09:00:00.000Z',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_attempt_table') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, created_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
+            );
+
+            return {
+              eq(column: string, value: number | string) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  eq(nextColumn: string, nextValue: string) {
+                    assert.equal(nextColumn, 'status');
+                    assert.equal(nextValue, 'accepted');
+
+                    return {
+                      order(orderColumn: string, options: { ascending: boolean }) {
+                        assert.equal(orderColumn, 'attempt_number');
+                        assert.deepEqual(options, { ascending: false });
+
+                        return {
+                          limit(limitValue: number) {
+                            assert.equal(limitValue, 1);
+
+                            return {
+                              async maybeSingle() {
+                                return {
+                                  data: {
+                                    custody_attempt_id: 'attempt-1',
+                                    post_id: 42,
+                                    item_id: 'item-1',
+                                    poster_id: 'user-1',
+                                    guard_post_id: 'guard-post-1',
+                                    handover_image_id: 99,
+                                    attempt_number: 1,
+                                    number_of_attempts: 1,
+                                    status: 'accepted',
+                                    decision_by_guard_id: 'guard-2',
+                                    decision_at: '2026-05-14T09:15:00.000Z',
+                                    closed_at: '2026-05-14T09:15:00.000Z',
+                                    created_at: '2026-05-14T09:05:00.000Z',
+                                    office_received_by_staff_id: null,
+                                    office_received_at: null,
+                                    investigation_opened_by: null,
+                                    investigation_opened_at: null,
+                                  },
+                                  error: null,
+                                };
+                              },
+                            };
+                          },
+                        };
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  await assert.rejects(
+    () =>
+      getStudentCustodyHistory(
+        {
+          post_id: 42,
+          actor: {
+            user_id: 'guard-1',
+            email: 'guard-1@umak.edu.ph',
+            user_type: 'Guard',
+          },
+        },
+        {
+          getSupabase: () => fakeSupabase,
+        }
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { statusCode?: number }).statusCode, 403);
+      assert.equal(error.message, 'Forbidden');
+      return true;
+    }
+  );
+});
+
 for (const custodyStatus of [
   'with_guard',
   'in_security_office',
   'claimed_by_student',
   'under_investigation',
+  'discarded',
 ] as const) {
   test(`createCustodyAttempt rejects posts already in ${custodyStatus}`, async () => {
     const fakeSupabase = {
@@ -33,7 +657,10 @@ for (const custodyStatus of [
 
         return {
           select(columns: string) {
-            assert.equal(columns, 'post_id, item_id, poster_id, item_type, post_status, custody_status');
+            assert.equal(
+              columns,
+              'post_id, item_id, poster_id, item_type, post_status, custody_status'
+            );
 
             return {
               eq(column: string, value: number) {
@@ -91,7 +718,7 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
           select(columns: string) {
             assert.equal(
               columns,
-              'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status'
+              'post_id, item_id, item_name, poster_id, item_type, post_status, item_status, custody_status'
             );
 
             return {
@@ -105,6 +732,7 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
                       data: {
                         post_id: 42,
                         item_id: 'item-1',
+                        item_name: 'Canvas Tote Bag',
                         poster_id: 'user-1',
                         item_type: 'found',
                         post_status: 'accepted',
@@ -135,6 +763,33 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
                 return Promise.resolve({
                   error: null,
                 });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'user_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'user_id, user_name');
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'user_id');
+                assert.equal(value, 'staff-1');
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        user_id: 'staff-1',
+                        user_name: 'Alyssa Ramos',
+                      },
+                      error: null,
+                    };
+                  },
+                };
               },
             };
           },
@@ -205,6 +860,8 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
   ]);
 
   assert.deepEqual(capturedAuditDetails, {
+    message: 'Staff Alyssa Ramos marked Canvas Tote Bag under investigation',
+    post_title: 'Canvas Tote Bag',
     post_id: 42,
     item_id: 'item-1',
     old_custody_status: 'claimed_by_student',
@@ -221,7 +878,7 @@ test('updateClaimedCustodyStatus rejects non-claimed found items', async () => {
         select(columns: string) {
           assert.equal(
             columns,
-            'post_id, item_id, poster_id, item_type, post_status, item_status, custody_status'
+            'post_id, item_id, item_name, poster_id, item_type, post_status, item_status, custody_status'
           );
 
           return {
@@ -235,6 +892,7 @@ test('updateClaimedCustodyStatus rejects non-claimed found items', async () => {
                     data: {
                       post_id: 42,
                       item_id: 'item-1',
+                      item_name: 'Canvas Tote Bag',
                       poster_id: 'user-1',
                       item_type: 'found',
                       post_status: 'accepted',
@@ -286,7 +944,10 @@ test('notifyGuardForCustodyFollowUp creates an in-app notification for the accep
       if (table === 'post_public_view') {
         return {
           select(columns: string) {
-            assert.equal(columns, 'post_id, item_id, poster_id, item_type, post_status, custody_status');
+            assert.equal(
+              columns,
+              'post_id, item_id, item_name, poster_id, item_type, post_status, custody_status'
+            );
 
             return {
               eq(column: string, value: number) {
@@ -299,10 +960,38 @@ test('notifyGuardForCustodyFollowUp creates an in-app notification for the accep
                       data: {
                         post_id: 42,
                         item_id: 'item-1',
+                        item_name: 'Canvas Tote Bag',
                         poster_id: 'user-1',
                         item_type: 'found',
                         post_status: 'accepted',
                         custody_status: 'with_guard',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'user_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'user_id, user_name');
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'user_id');
+                assert.equal(value, 'staff-1');
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        user_id: 'staff-1',
+                        user_name: 'Alyssa Ramos',
                       },
                       error: null,
                     };
@@ -319,7 +1008,7 @@ test('notifyGuardForCustodyFollowUp creates an in-app notification for the accep
           select(columns: string) {
             assert.equal(
               columns,
-              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
+              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, created_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
             );
 
             return {
@@ -360,6 +1049,7 @@ test('notifyGuardForCustodyFollowUp creates an in-app notification for the accep
                     decision_by_guard_id: 'guard-1',
                     decision_at: '2026-05-14T09:00:00.000Z',
                     closed_at: '2026-05-14T09:00:00.000Z',
+                    created_at: '2026-05-14T08:55:00.000Z',
                     office_received_by_staff_id: null,
                     office_received_at: null,
                     investigation_opened_by: null,
@@ -412,7 +1102,8 @@ test('notifyGuardForCustodyFollowUp creates an in-app notification for the accep
     user_id: 'guard-1',
     title: 'Custody Follow-up Needed',
     body: 'A staff member requested follow-up for a custody handover that has not yet been received in the Security Office.',
-    description: 'Please review the accepted custody handover and coordinate delivery to the Security Office.',
+    description:
+      'Please review the accepted custody handover and coordinate delivery to the Security Office.',
     type: 'custody_guard_follow_up',
     data: {
       post_id: 42,
@@ -425,6 +1116,8 @@ test('notifyGuardForCustodyFollowUp creates an in-app notification for the accep
   });
 
   assert.deepEqual(capturedAuditDetails, {
+    message: 'Staff Alyssa Ramos requested guard follow-up for Canvas Tote Bag',
+    post_title: 'Canvas Tote Bag',
     post_id: 42,
     item_id: 'item-1',
     custody_attempt_id: 'attempt-1',
@@ -548,6 +1241,7 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
       decision_by_guard_id: 'guard-1',
       decision_at: '2026-05-12T11:00:00.000Z',
       closed_at: '2026-05-12T11:00:00.000Z',
+      created_at: '2026-05-12T10:45:00.000Z',
       office_received_by_staff_id: null,
       office_received_at: null,
       investigation_opened_by: null,
@@ -566,6 +1260,7 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
       decision_by_guard_id: 'guard-2',
       decision_at: '2026-05-11T12:00:00.000Z',
       closed_at: '2026-05-11T12:00:00.000Z',
+      created_at: '2026-05-11T11:45:00.000Z',
       office_received_by_staff_id: null,
       office_received_at: null,
       investigation_opened_by: null,
@@ -578,7 +1273,28 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
       if (table === 'user_table') {
         return {
           select(columns: string) {
-            assert.equal(columns, 'user_id, user_type, email');
+            if (columns === 'user_id, user_type, email') {
+              return {
+                eq(column: string, value: string) {
+                  assert.equal(column, 'user_id');
+                  assert.equal(value, 'staff-automation-1');
+                  return {
+                    async single() {
+                      return {
+                        data: {
+                          user_id: 'staff-automation-1',
+                          user_type: 'Staff',
+                          email: 'automation@umak.edu.ph',
+                        },
+                        error: null,
+                      };
+                    },
+                  };
+                },
+              };
+            }
+
+            assert.equal(columns, 'user_id, user_name');
             return {
               eq(column: string, value: string) {
                 assert.equal(column, 'user_id');
@@ -588,8 +1304,33 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
                     return {
                       data: {
                         user_id: 'staff-automation-1',
-                        user_type: 'Staff',
-                        email: 'automation@umak.edu.ph',
+                        user_name: 'Automated Custody',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'item_name');
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.ok(value === 42 || value === 43);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        item_name: value === 42 ? 'Canvas Tote Bag' : 'Silver Water Bottle',
                       },
                       error: null,
                     };
@@ -606,7 +1347,7 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
           select(columns: string) {
             assert.equal(
               columns,
-              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
+              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, created_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
             );
 
             return {
@@ -620,9 +1361,7 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
               },
               is(column: string, value: null) {
                 assert.equal(value, null);
-                assert.ok(
-                  column === 'office_received_at' || column === 'investigation_opened_at'
-                );
+                assert.ok(column === 'office_received_at' || column === 'investigation_opened_at');
                 return this;
               },
               lte(column: string, value: string) {
@@ -717,6 +1456,15 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
     occurred_at: '2026-05-14T12:00:00.000Z',
   });
   assert.equal(auditDetails.length, 2);
+  assert.deepEqual(auditDetails[0], {
+    message: 'Staff Automated Custody auto-opened a custody investigation for Canvas Tote Bag',
+    post_title: 'Canvas Tote Bag',
+    post_id: 42,
+    item_id: 'item-1',
+    custody_attempt_id: 'attempt-1',
+    decision_at: '2026-05-12T11:00:00.000Z',
+    threshold_hours: 48,
+  });
 });
 
 test('escalateStaleAcceptedCustodyAttempts rejects missing automation staff configuration', async () => {

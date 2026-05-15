@@ -10,10 +10,14 @@ import { UserType } from '../types/auth.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test_secret_for_tests';
 
-const completeScanPayload: GuardScanRequest = {
+const completeScanPayload = {
+  manual_entry_code: 'AB2C3D',
+} satisfies GuardScanRequest;
+
+const legacyQrScanPayload = {
   qr_code_session_id: 'session-1',
   session_token: 'live-qr-session-token',
-};
+} satisfies GuardScanRequest;
 
 const completeDecisionPayload: GuardDecisionRequest = {
   qr_code_session_id: 'session-1',
@@ -91,10 +95,13 @@ function createGuardServices(): GuardRouteServices {
       custody_status: 'with_guard',
       decision_at: '2026-05-14T10:00:00.000Z',
     }),
+    listGuardActiveClaimReviews: async () => ({
+      posts: [],
+    }),
   };
 }
 
-for (const missingField of ['qr_code_session_id', 'session_token'] as const) {
+for (const missingField of ['manual_entry_code'] as const) {
   test(`POST /guard/custody/scan missing ${missingField} returns 400`, async () => {
     const app = Fastify();
     await app.register(guardRoutes, { prefix: '/guard' });
@@ -112,6 +119,31 @@ for (const missingField of ['qr_code_session_id', 'session_token'] as const) {
     await app.close();
   });
 }
+
+test('POST /guard/custody/scan accepts the legacy QR payload shape', async () => {
+  const app = Fastify();
+  await app.register(guardRoutes, {
+    prefix: '/guard',
+    services: createGuardServices(),
+  });
+
+  setAuthSupabaseClientFactoryForTests(() =>
+    createGuardAuthSupabase('Guard', 'guard-1@umak.edu.ph')
+  );
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/guard/custody/scan',
+    headers: {
+      authorization: `Bearer ${createToken('Guard')}`,
+    },
+    payload: legacyQrScanPayload,
+  });
+
+  setAuthSupabaseClientFactoryForTests(null);
+  assert.equal(res.statusCode, 200);
+  await app.close();
+});
 
 for (const missingField of ['qr_code_session_id', 'decision'] as const) {
   test(`POST /guard/custody/attempts/:id/decision missing ${missingField} returns 400`, async () => {
@@ -185,7 +217,7 @@ test('POST /guard/custody/scan rejects staff access with 403', { concurrency: fa
   await app.close();
 });
 
-test('POST /guard/custody/scan passes the authenticated guard to the service', { concurrency: false }, async (t) => {
+test('POST /guard/custody/scan passes the manual entry code and authenticated guard to the service', { concurrency: false }, async (t) => {
   const app = Fastify();
   let capturedInput: GuardScanInput | null = null;
   const services: GuardRouteServices = {
@@ -238,8 +270,71 @@ test('POST /guard/custody/scan passes the authenticated guard to the service', {
   assert.ok(capturedInput);
   const captured = capturedInput as GuardScanInput;
 
-  assert.equal(captured.qr_code_session_id, completeScanPayload.qr_code_session_id);
-  assert.equal(captured.session_token, completeScanPayload.session_token);
+  assert.ok('manual_entry_code' in captured);
+  assert.equal(captured.manual_entry_code, completeScanPayload.manual_entry_code);
+  assert.equal(captured.actor.user_id, 'guard-123');
+  assert.equal(captured.actor.user_type, 'Guard');
+  assert.equal(captured.actor.email, 'guard-123@umak.edu.ph');
+
+  await app.close();
+});
+
+test('POST /guard/custody/scan still passes the legacy QR payload to the service', { concurrency: false }, async (t) => {
+  const app = Fastify();
+  let capturedInput: GuardScanInput | null = null;
+  const services: GuardRouteServices = {
+    ...createGuardServices(),
+    scanCustodySession: async (input) => {
+      capturedInput = input;
+      return {
+        qr_code_session_id: 'session-1',
+        custody_attempt_id: 'attempt-1',
+        post_id: 42,
+        item_id: 'item-1',
+        item_name: 'Wallet',
+        item_description: 'Black wallet',
+        item_image_url: 'https://example.com/item.webp',
+        handover_image_url: 'https://example.com/handover.webp',
+        category: 'Accessories',
+        last_seen_at: '2026-05-14T09:30:00.000Z',
+        last_seen_location: 'Main Building > Lobby',
+        submission_date: '2026-05-14T09:00:00.000Z',
+        guard_post_id: 'guard-post-1',
+        guard_post_name: 'Main Gate',
+        attempt_number: 1,
+        custody_status: 'handover_in_progress',
+        qr_status: 'active',
+        attempt_status: 'open',
+      };
+    },
+  };
+
+  await app.register(guardRoutes, {
+    prefix: '/guard',
+    services,
+  });
+
+  setAuthSupabaseClientFactoryForTests(() =>
+    createGuardAuthSupabase('Guard', 'guard-123@umak.edu.ph')
+  );
+  t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/guard/custody/scan',
+    headers: {
+      authorization: `Bearer ${createToken('Guard', 'guard-123', 'guard-123@umak.edu.ph')}`,
+    },
+    payload: legacyQrScanPayload,
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(capturedInput);
+  const captured = capturedInput as GuardScanInput;
+
+  assert.ok('qr_code_session_id' in captured);
+  assert.equal(captured.qr_code_session_id, legacyQrScanPayload.qr_code_session_id);
+  assert.equal(captured.session_token, legacyQrScanPayload.session_token);
   assert.equal(captured.actor.user_id, 'guard-123');
   assert.equal(captured.actor.user_type, 'Guard');
   assert.equal(captured.actor.email, 'guard-123@umak.edu.ph');

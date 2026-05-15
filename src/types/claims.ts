@@ -1,3 +1,8 @@
+import type {
+  ClaimVerificationMethod,
+  ClaimVerificationSubmission,
+} from './claim-verification.js';
+
 export interface ClaimDetails {
   claimer_name: string;
   claimer_school_email: string;
@@ -12,6 +17,7 @@ export interface ProcessClaimRequest {
   found_post_id: number;
   missing_post_id?: number | null;
   claim_details: ClaimDetails;
+  claim_verification?: ClaimVerificationSubmission;
 }
 
 export interface ExistingClaimResponse {
@@ -26,5 +32,8 @@ export interface ExistingClaimResponse {
     processed_by_staff_id: string;
     claimed_at: string | null;
     staff_name?: string;
+    verification_method?: ClaimVerificationMethod;
+    verified_claimer_user_id?: string | null;
+    claim_verification_session_id?: string | null;
   };
 }

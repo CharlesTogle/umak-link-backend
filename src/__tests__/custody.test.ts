@@ -57,6 +57,7 @@ function createCustodyServices(): CustodyRouteServices {
     createCustodyAttempt: async () => ({
       custody_attempt_id: 'attempt-1',
       qr_code_session_id: 'session-1',
+      manual_entry_code: 'AB2C3D',
       attempt_status: 'open',
       qr_status: 'active',
       custody_status: 'handover_in_progress',
@@ -70,6 +71,7 @@ function createCustodyServices(): CustodyRouteServices {
       custody_attempt_id: 'attempt-1',
       post_id: 42,
       item_id: 'item-1',
+      manual_entry_code: 'AB2C3D',
       qr_status: 'active',
       attempt_status: 'open',
       custody_status: 'handover_in_progress',
@@ -85,6 +87,7 @@ function createCustodyServices(): CustodyRouteServices {
     retryCustodySession: async () => ({
       custody_attempt_id: 'attempt-1',
       qr_code_session_id: 'session-1',
+      manual_entry_code: 'CD4E5F',
       attempt_status: 'open',
       qr_status: 'active',
       custody_status: 'handover_in_progress',
@@ -287,6 +290,7 @@ test('POST /custody/attempts passes the authenticated actor to the service', asy
       return {
         custody_attempt_id: 'attempt-1',
         qr_code_session_id: 'session-1',
+        manual_entry_code: 'AB2C3D',
         attempt_status: 'open',
         qr_status: 'active',
         custody_status: 'handover_in_progress',
@@ -394,6 +398,7 @@ test('GET /custody/sessions/:qrCodeSessionId/status returns the service response
     custody_attempt_id: 'attempt-1',
     post_id: 42,
     item_id: 'item-1',
+    manual_entry_code: 'AB2C3D',
     qr_status: 'active',
     attempt_status: 'open',
     custody_status: 'handover_in_progress',
@@ -482,6 +487,7 @@ test('POST /custody/sessions/:qrCodeSessionId/retry passes the authenticated act
       return {
         custody_attempt_id: 'attempt-1',
         qr_code_session_id: 'session-1',
+        manual_entry_code: 'CD4E5F',
         attempt_status: 'open',
         qr_status: 'active',
         custody_status: 'handover_in_progress',

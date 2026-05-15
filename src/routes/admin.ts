@@ -6,6 +6,26 @@ import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
 import { AUDIT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
+const HIDDEN_ADMIN_AUDIT_ACTION_TYPES = [
+  'custody_attempt_created',
+  'custody_attempt_cancelled',
+  'custody_session_retried',
+  'custody_session_expired',
+  'claim_verification_claimer_joined',
+  'claim_verification_qr_refreshed',
+  'claim_verification_qr_retried',
+] as const;
+
+function applyAuditVisibilityFilter<
+  T extends { not: (column: string, operator: string, value: string) => T },
+>(query: T): T {
+  const hiddenActionTypes = HIDDEN_ADMIN_AUDIT_ACTION_TYPES.map(
+    (actionType) => `"${actionType}"`
+  ).join(',');
+
+  return query.not('action_type', 'in', `(${hiddenActionTypes})`);
+}
+
 export default async function adminRoutes(server: FastifyInstance) {
   // GET /admin/users - List users with filters
   server.get<{
@@ -31,7 +51,9 @@ export default async function adminRoutes(server: FastifyInstance) {
 
       let query = supabase
         .from('user_table')
-        .select('user_id, user_name, email, profile_picture_url, user_type, created_at, last_login');
+        .select(
+          'user_id, user_name, email, profile_picture_url, user_type, created_at, last_login'
+        );
 
       // Filter by user types if provided (comma-separated)
       if (user_type) {
@@ -54,8 +76,8 @@ export default async function adminRoutes(server: FastifyInstance) {
   server.put<{
     Params: { id: string };
     Body: {
-      role: 'User' | 'Staff' | 'Admin';
-      previous_role?: 'User' | 'Staff' | 'Admin';
+      role: 'User' | 'Staff' | 'Admin' | 'Guard';
+      previous_role?: 'User' | 'Staff' | 'Admin' | 'Guard';
     };
   }>(
     '/users/:id/role',
@@ -73,8 +95,8 @@ export default async function adminRoutes(server: FastifyInstance) {
           type: 'object',
           required: ['role'],
           properties: {
-            role: { type: 'string', enum: ['User', 'Staff', 'Admin'] },
-            previous_role: { type: 'string', enum: ['User', 'Staff', 'Admin'] },
+            role: { type: 'string', enum: ['User', 'Staff', 'Admin', 'Guard'] },
+            previous_role: { type: 'string', enum: ['User', 'Staff', 'Admin', 'Guard'] },
           },
           additionalProperties: false,
         },
@@ -97,7 +119,10 @@ export default async function adminRoutes(server: FastifyInstance) {
         .single();
 
       if (existingUserError || !existingUser) {
-        logger.error({ error: existingUserError, userId }, 'Failed to load user before role update');
+        logger.error(
+          { error: existingUserError, userId },
+          'Failed to load user before role update'
+        );
         throw new Error('Failed to update user role');
       }
 
@@ -106,7 +131,9 @@ export default async function adminRoutes(server: FastifyInstance) {
           { userId, expectedRole: previous_role, actualRole: existingUser.user_type },
           'Role update rejected because the target role changed before submission'
         );
-        throw new Error('User role changed before the update could be applied. Please refresh and try again.');
+        throw new Error(
+          'User role changed before the update could be applied. Please refresh and try again.'
+        );
       }
 
       if (existingUser.user_type === role) {
@@ -114,10 +141,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       }
 
       // Build the update query
-      let query = supabase
-        .from('user_table')
-        .update({ user_type: role })
-        .eq('user_id', userId);
+      let query = supabase.from('user_table').update({ user_type: role }).eq('user_id', userId);
 
       // If previous_role is 'User', ensure we only promote regular users
       if (previous_role === 'User') {
@@ -141,15 +165,16 @@ export default async function adminRoutes(server: FastifyInstance) {
         new_role: role,
       };
 
-      const { error: auditError } = await withTimeout(Promise.resolve(
-        supabase.rpc('insert_audit_log', {
-          p_user_id: actorId,
-          p_action_type: 'role_updated',
-          p_target_entity_type: 'user_table',
-          p_target_entity_id: userId,
-          p_details: auditDetails,
-        })
-      ),
+      const { error: auditError } = await withTimeout(
+        Promise.resolve(
+          supabase.rpc('insert_audit_log', {
+            p_user_id: actorId,
+            p_action_type: 'role_updated',
+            p_target_entity_type: 'user_table',
+            p_target_entity_id: userId,
+            p_details: auditDetails,
+          })
+        ),
         AUDIT_TIMEOUT_MS,
         'Insert role audit log'
       );
@@ -201,16 +226,18 @@ export default async function adminRoutes(server: FastifyInstance) {
         throw new Error('Failed to fetch dashboard stats');
       }
 
-      return data?.[0] || {
-        pending_verifications: 0,
-        pending_fraud_reports: 0,
-        claimed_count: 0,
-        unclaimed_count: 0,
-        to_review_count: 0,
-        lost_count: 0,
-        returned_count: 0,
-        reported_count: 0,
-      };
+      return (
+        data?.[0] || {
+          pending_verifications: 0,
+          pending_fraud_reports: 0,
+          claimed_count: 0,
+          unclaimed_count: 0,
+          to_review_count: 0,
+          lost_count: 0,
+          returned_count: 0,
+          reported_count: 0,
+        }
+      );
     }
   );
 
@@ -288,11 +315,13 @@ export default async function adminRoutes(server: FastifyInstance) {
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
-      const { data, error } = await supabase
-        .from('view_audit_logs_with_user_details')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .range(offsetNum, offsetNum + limitNum - 1);
+      const { data, error } = await applyAuditVisibilityFilter(
+        supabase
+          .from('view_audit_logs_with_user_details')
+          .select('*')
+          .order('timestamp', { ascending: false })
+          .range(offsetNum, offsetNum + limitNum - 1)
+      );
 
       if (error) {
         logger.error({ error }, 'Failed to fetch audit logs');
@@ -397,12 +426,14 @@ export default async function adminRoutes(server: FastifyInstance) {
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
-      const { data, error } = await supabase
-        .from('view_audit_logs_with_user_details')
-        .select('*')
-        .eq('user_id', userId)
-        .order('timestamp', { ascending: false })
-        .range(offsetNum, offsetNum + limitNum - 1);
+      const { data, error } = await applyAuditVisibilityFilter(
+        supabase
+          .from('view_audit_logs_with_user_details')
+          .select('*')
+          .eq('user_id', userId)
+          .order('timestamp', { ascending: false })
+          .range(offsetNum, offsetNum + limitNum - 1)
+      );
 
       if (error) {
         logger.error({ error, userId }, 'Failed to fetch user audit logs');
@@ -458,6 +489,14 @@ export default async function adminRoutes(server: FastifyInstance) {
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
+      if (
+        HIDDEN_ADMIN_AUDIT_ACTION_TYPES.includes(
+          actionType as (typeof HIDDEN_ADMIN_AUDIT_ACTION_TYPES)[number]
+        )
+      ) {
+        return { logs: [] };
+      }
+
       const { data, error } = await supabase
         .from('view_audit_logs_with_user_details')
         .select('*')
@@ -512,7 +551,20 @@ export default async function adminRoutes(server: FastifyInstance) {
       const pending: number[] = [];
 
       const today = new Date();
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const monthNames = [
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
+      ];
 
       // Build promises for all 12 weeks of data
       const promises = [];
@@ -630,7 +682,12 @@ export default async function adminRoutes(server: FastifyInstance) {
 
 function escapeCsvValue(value: string | null): string | null {
   if (value === null) return null;
-  if (value.startsWith('=') || value.startsWith('+') || value.startsWith('-') || value.startsWith('@')) {
+  if (
+    value.startsWith('=') ||
+    value.startsWith('+') ||
+    value.startsWith('-') ||
+    value.startsWith('@')
+  ) {
     return `'${value}`;
   }
   return value;

@@ -64,9 +64,21 @@ function initializeFirebase(): void {
     try {
       serviceAccount = JSON.parse(serviceAccountEnv);
     } catch (parseError) {
+      const trimmedEnv = serviceAccountEnv.trim();
+      const looksLikeTruncatedMultilineObject =
+        trimmedEnv === '{' || (trimmedEnv.startsWith('{') && !trimmedEnv.endsWith('}'));
+
       logger.error(
-        { error: parseError },
-        'Failed to parse FIREBASE_SERVICE_ACCOUNT as JSON. Ensure it is a valid JSON string.'
+        {
+          error: parseError,
+          valueLength: serviceAccountEnv.length,
+          startsWithBrace: trimmedEnv.startsWith('{'),
+          endsWithBrace: trimmedEnv.endsWith('}'),
+          looksLikeTruncatedMultilineObject,
+        },
+        looksLikeTruncatedMultilineObject
+          ? 'Failed to parse FIREBASE_SERVICE_ACCOUNT as JSON. The value looks truncated, which usually means a raw multi-line JSON object was pasted into .env. Store the entire service account as a single quoted JSON string.'
+          : 'Failed to parse FIREBASE_SERVICE_ACCOUNT as JSON. Ensure it is a valid JSON string.'
       );
       return;
     }

@@ -5,7 +5,8 @@ import {
   escalateStaleAcceptedCustodyAttempts,
   getStudentCustodyHistory,
   notifyGuardForCustodyFollowUp,
-  updateClaimedCustodyStatus,
+  openCustodyInvestigation,
+  updatePostCustodyStatus,
 } from '../services/custody.js';
 
 const baseInput = {
@@ -436,6 +437,66 @@ test('getStudentCustodyHistory allows the accepted guard to read tracking histor
         };
       }
 
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              in(column: string, value: string[]) {
+                assert.equal(column, 'item_id');
+                assert.deepEqual(value, ['item-1', 'item-2']);
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              in(column: string, value: string[]) {
+                assert.equal(column, 'item_id');
+                assert.deepEqual(value, ['item-1', 'item-2']);
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              in(column: string, value: string[]) {
+                assert.equal(column, 'item_id');
+                assert.deepEqual(value, ['item-1', 'item-2']);
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
       if (table === 'custody_record_table') {
         return {
           select(columns: string) {
@@ -650,7 +711,7 @@ for (const custodyStatus of [
   'under_investigation',
   'discarded',
 ] as const) {
-  test(`createCustodyAttempt rejects posts already in ${custodyStatus}`, async () => {
+test(`createCustodyAttempt rejects posts already in ${custodyStatus}`, async () => {
     const fakeSupabase = {
       from(table: string) {
         assert.equal(table, 'post_public_view');
@@ -707,7 +768,7 @@ for (const custodyStatus of [
   });
 }
 
-test('updateClaimedCustodyStatus updates the custody status and writes poster-visible history', async () => {
+test('updatePostCustodyStatus updates claimed found item custody and writes poster-visible history', async () => {
   const insertedRecords: Array<Record<string, unknown>> = [];
   let capturedAuditDetails: Record<string, unknown> | null = null;
 
@@ -796,6 +857,26 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
         };
       }
 
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              in(column: string, value: string[]) {
+                assert.equal(column, 'item_id');
+                assert.deepEqual(value, ['item-1', 'item-2']);
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
       if (table === 'custody_record_table') {
         return {
           insert(records: Array<Record<string, unknown>>) {
@@ -811,7 +892,7 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
     },
   } as never;
 
-  const response = await updateClaimedCustodyStatus(
+  const response = await updatePostCustodyStatus(
     {
       post_id: 42,
       custody_status: 'under_investigation',
@@ -869,7 +950,406 @@ test('updateClaimedCustodyStatus updates the custody status and writes poster-vi
   });
 });
 
-test('updateClaimedCustodyStatus rejects non-claimed found items', async () => {
+test('openCustodyInvestigation persists under_investigation on the item record', async () => {
+  const insertedRecords: Array<Record<string, unknown>> = [];
+  const auditDetails: Array<Record<string, unknown>> = [];
+
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, item_name, poster_id, item_type, post_status, custody_status'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        item_name: 'Canvas Tote Bag',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'accepted',
+                        custody_status: 'with_guard',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_attempt_table') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'custody_attempt_id, post_id, item_id, poster_id, guard_post_id, handover_image_id, attempt_number, number_of_attempts, status, decision_by_guard_id, decision_at, closed_at, created_at, office_received_by_staff_id, office_received_at, investigation_opened_by, investigation_opened_at'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  order(orderColumn: string, options: { ascending: boolean }) {
+                    assert.equal(orderColumn, 'attempt_number');
+                    assert.deepEqual(options, { ascending: false });
+
+                    return {
+                      limit(limitValue: number) {
+                        assert.equal(limitValue, 1);
+
+                        return {
+                          async maybeSingle() {
+                            return {
+                              data: {
+                                custody_attempt_id: 'attempt-1',
+                                post_id: 42,
+                                item_id: 'item-1',
+                                poster_id: 'user-1',
+                                guard_post_id: 'guard-post-1',
+                                handover_image_id: 99,
+                                attempt_number: 1,
+                                number_of_attempts: 1,
+                                status: 'accepted',
+                                decision_by_guard_id: 'guard-2',
+                                decision_at: '2026-05-14T09:15:00.000Z',
+                                closed_at: '2026-05-14T09:15:00.000Z',
+                                created_at: '2026-05-14T09:05:00.000Z',
+                                office_received_by_staff_id: null,
+                                office_received_at: null,
+                                investigation_opened_by: null,
+                                investigation_opened_at: null,
+                              },
+                              error: null,
+                            };
+                          },
+                        };
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              investigation_opened_by: 'staff-1',
+              investigation_opened_at: '2026-05-14T12:00:00.000Z',
+            });
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'custody_attempt_id');
+                assert.equal(value, 'attempt-1');
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'custody_status');
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'item_id');
+                assert.equal(value, 'item-1');
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        custody_status: 'under_investigation',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              in(column: string, value: string[]) {
+                assert.equal(column, 'item_id');
+                assert.deepEqual(value, ['item-1']);
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'user_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'user_id, user_name');
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'user_id');
+                assert.equal(value, 'staff-1');
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        user_id: 'staff-1',
+                        user_name: 'Alyssa Ramos',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_record_table') {
+        return {
+          insert(records: Array<Record<string, unknown>>) {
+            insertedRecords.push(...records);
+            return {
+              error: null,
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  const response = await openCustodyInvestigation(
+    {
+      post_id: 42,
+      actor: {
+        user_id: 'staff-1',
+        email: 'staff-1@umak.edu.ph',
+        user_type: 'Staff',
+      },
+    },
+    {
+      getSupabase: () => fakeSupabase,
+      now: () => new Date('2026-05-14T12:00:00.000Z'),
+      auditLogger: async (params) => {
+        auditDetails.push(params.details);
+      },
+    }
+  );
+
+  assert.deepEqual(response, {
+    post_id: 42,
+    custody_attempt_id: 'attempt-1',
+    custody_status: 'under_investigation',
+    investigation_opened_at: '2026-05-14T12:00:00.000Z',
+  });
+
+  assert.equal(insertedRecords.length, 1);
+  assert.deepEqual(insertedRecords[0], {
+    post_id: 42,
+    item_id: 'item-1',
+    custody_attempt_id: 'attempt-1',
+    qr_code_session_id: null,
+    guard_post_id: 'guard-post-1',
+    actor_user_id: 'staff-1',
+    record_type: 'investigation_opened',
+    visible_to_poster: true,
+    details: {
+      attempt_status: 'accepted',
+    },
+    occurred_at: '2026-05-14T12:00:00.000Z',
+  });
+  assert.equal(auditDetails.length, 1);
+});
+
+test('updatePostCustodyStatus updates untracked found item custody with the allowed untracked options', async () => {
+  const insertedRecords: Array<Record<string, unknown>> = [];
+  let capturedAuditDetails: Record<string, unknown> | null = null;
+
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, item_name, poster_id, item_type, post_status, item_status, custody_status'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, 42);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        item_name: 'Canvas Tote Bag',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'pending',
+                        item_status: 'unclaimed',
+                        custody_status: 'untracked',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'with_guard',
+            });
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'item_id');
+                assert.equal(value, 'item-1');
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'user_table') {
+        return {
+          select(columns: string) {
+            assert.equal(columns, 'user_id, user_name');
+
+            return {
+              eq(column: string, value: string) {
+                assert.equal(column, 'user_id');
+                assert.equal(value, 'staff-1');
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        user_id: 'staff-1',
+                        user_name: 'Alyssa Ramos',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_record_table') {
+        return {
+          insert(records: Array<Record<string, unknown>>) {
+            insertedRecords.push(...records);
+            return {
+              error: null,
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  const response = await updatePostCustodyStatus(
+    {
+      post_id: 42,
+      custody_status: 'with_guard',
+      actor: {
+        user_id: 'staff-1',
+        email: 'staff-1@umak.edu.ph',
+        user_type: 'Staff',
+      },
+    },
+    {
+      getSupabase: () => fakeSupabase,
+      now: () => new Date('2026-05-14T11:20:00.000Z'),
+      auditLogger: async (params) => {
+        capturedAuditDetails = params.details as Record<string, unknown>;
+      },
+    }
+  );
+
+  assert.deepEqual(response, {
+    post_id: 42,
+    item_id: 'item-1',
+    custody_status: 'with_guard',
+    updated_at: '2026-05-14T11:20:00.000Z',
+  });
+
+  assert.deepEqual(insertedRecords, [
+    {
+      post_id: 42,
+      item_id: 'item-1',
+      custody_attempt_id: null,
+      qr_code_session_id: null,
+      guard_post_id: null,
+      actor_user_id: 'staff-1',
+      record_type: 'staff_marked_with_guard',
+      visible_to_poster: true,
+      details: {
+        previous_custody_status: 'untracked',
+        next_custody_status: 'with_guard',
+      },
+      occurred_at: '2026-05-14T11:20:00.000Z',
+    },
+  ]);
+
+  assert.deepEqual(capturedAuditDetails, {
+    message: 'Staff Alyssa Ramos marked Canvas Tote Bag as with the guard',
+    post_title: 'Canvas Tote Bag',
+    post_id: 42,
+    item_id: 'item-1',
+    old_custody_status: 'untracked',
+    new_custody_status: 'with_guard',
+  });
+});
+
+test('updatePostCustodyStatus rejects found items that are neither claimed nor untracked', async () => {
   const fakeSupabase = {
     from(table: string) {
       assert.equal(table, 'post_public_view');
@@ -912,7 +1392,7 @@ test('updateClaimedCustodyStatus rejects non-claimed found items', async () => {
 
   await assert.rejects(
     () =>
-      updateClaimedCustodyStatus(
+      updatePostCustodyStatus(
         {
           post_id: 42,
           custody_status: 'claimed_by_student',
@@ -929,7 +1409,7 @@ test('updateClaimedCustodyStatus rejects non-claimed found items', async () => {
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.equal((error as Error & { statusCode?: number }).statusCode, 409);
-      assert.equal(error.message, 'Only claimed found items can update custody status');
+      assert.equal(error.message, 'Only claimed found items or untracked found items can update custody status');
       return true;
     }
   );
@@ -1389,6 +1869,26 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
               in(column: string, value: string[]) {
                 assert.equal(column, 'custody_attempt_id');
                 assert.deepEqual(value, ['attempt-1', 'attempt-2']);
+                return Promise.resolve({
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'item_table') {
+        return {
+          update(values: Record<string, unknown>) {
+            assert.deepEqual(values, {
+              custody_status: 'under_investigation',
+            });
+
+            return {
+              in(column: string, value: string[]) {
+                assert.equal(column, 'item_id');
+                assert.deepEqual(value, ['item-1', 'item-2']);
                 return Promise.resolve({
                   error: null,
                 });

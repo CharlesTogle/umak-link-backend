@@ -481,6 +481,7 @@ test(
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
+    const claimUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
     const custodyUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
     const postUpdates: Array<{ values: Record<string, unknown>; postId: number }> = [];
     let verificationCalled = false;
@@ -573,6 +574,15 @@ test(
                       };
                     },
                   };
+                },
+              };
+            },
+            update(values: Record<string, unknown>) {
+              return {
+                eq(column: string, value: string) {
+                  assert.equal(column, 'item_id');
+                  claimUpdates.push({ values, itemId: value });
+                  return Promise.resolve({ error: null });
                 },
               };
             },
@@ -707,6 +717,14 @@ test(
         postId: 42,
         values: {
           status: 'accepted',
+        },
+      },
+    ]);
+    assert.deepEqual(claimUpdates, [
+      {
+        itemId: 'found-item-42',
+        values: {
+          verification_method: 'guard_qr',
         },
       },
     ]);
@@ -1014,6 +1032,7 @@ test(
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
+    const claimUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
     const postUpdates: Array<{ values: Record<string, unknown>; postId: number }> = [];
 
     const fakeSupabase = {
@@ -1089,6 +1108,15 @@ test(
                 },
               };
             },
+            update(values: Record<string, unknown>) {
+              return {
+                eq(column: string, value: string) {
+                  assert.equal(column, 'item_id');
+                  claimUpdates.push({ values, itemId: value });
+                  return Promise.resolve({ error: null });
+                },
+              };
+            },
           };
         }
 
@@ -1148,7 +1176,7 @@ test(
       getUserName: async () => 'Guard One',
       logAudit: async () => {},
       canGuardAccessClaimReview: async () => true,
-      updateClaimedCustodyStatus: async () => {
+      updatePostCustodyStatus: async () => {
         throw new Error('late custody failure');
       },
     });
@@ -1181,6 +1209,14 @@ test(
         postId: 42,
         values: {
           status: 'accepted',
+        },
+      },
+    ]);
+    assert.deepEqual(claimUpdates, [
+      {
+        itemId: 'found-item-42',
+        values: {
+          verification_method: 'guard_qr',
         },
       },
     ]);

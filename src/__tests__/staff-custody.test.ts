@@ -9,13 +9,13 @@ import {
   OpenCustodyInvestigationInput,
   ReportPhysicalTakeInput,
   SecurityOfficeReceiptInput,
-  UpdateClaimedCustodyStatusInput,
+  UpdatePostCustodyStatusInput,
 } from '../services/custody.js';
 import {
   NotifyGuardRequest,
   PhysicalTakeReportRequest,
   StaffCustodyPostRequest,
-  UpdateClaimedCustodyStatusRequest,
+  UpdatePostCustodyStatusRequest,
 } from '../types/custody.js';
 import { UserType } from '../types/auth.js';
 
@@ -34,9 +34,9 @@ const completeNotifyGuardPayload: NotifyGuardRequest = {
   post_id: 42,
 };
 
-const completeClaimedCustodyStatusPayload: UpdateClaimedCustodyStatusRequest = {
+const completePostCustodyStatusPayload: UpdatePostCustodyStatusRequest = {
   post_id: 42,
-  custody_status: 'claimed_by_student',
+  custody_status: 'with_guard',
 };
 
 function createToken(userType: UserType, userId = 'staff-1', email = 'staff-1@umak.edu.ph'): string {
@@ -108,10 +108,10 @@ function createStaffCustodyServices(): StaffCustodyRouteServices {
       notification_status: 'created',
       requested_at: '2026-05-14T11:15:00.000Z',
     }),
-    updateClaimedCustodyStatus: async () => ({
+    updatePostCustodyStatus: async () => ({
       post_id: 42,
       item_id: 'item-1',
-      custody_status: 'claimed_by_student',
+      custody_status: 'with_guard',
       updated_at: '2026-05-14T11:20:00.000Z',
     }),
   };
@@ -209,7 +209,7 @@ for (const missingField of ['post_id', 'custody_status'] as const) {
     const app = Fastify();
     await app.register(staffCustodyRoutes, { prefix: '/staff' });
 
-    const payload = { ...completeClaimedCustodyStatusPayload } as Record<string, unknown>;
+    const payload = { ...completePostCustodyStatusPayload } as Record<string, unknown>;
     delete payload[missingField];
 
     const res = await app.inject({
@@ -289,7 +289,7 @@ for (const authCase of [
       method: 'PUT',
       url: '/staff/custody/status',
       headers: authCase.headers,
-      payload: completeClaimedCustodyStatusPayload,
+      payload: completePostCustodyStatusPayload,
     });
 
     assert.equal(res.statusCode, authCase.expectedStatus);
@@ -316,7 +316,7 @@ for (const config of [
   },
   {
     url: '/staff/custody/status',
-    payload: completeClaimedCustodyStatusPayload,
+    payload: completePostCustodyStatusPayload,
   },
 ] as const) {
   test(`${config.url.startsWith('/staff/custody/status') ? 'PUT' : 'POST'} ${config.url} rejects admin access with 403`, { concurrency: false }, async (t) => {
@@ -532,15 +532,15 @@ test('POST /staff/custody/guards/notify passes the authenticated staff to the se
 
 test('PUT /staff/custody/status passes the authenticated staff to the service', { concurrency: false }, async (t) => {
   const app = Fastify();
-  let capturedInput: UpdateClaimedCustodyStatusInput | null = null;
+  let capturedInput: UpdatePostCustodyStatusInput | null = null;
   const services: StaffCustodyRouteServices = {
     ...createStaffCustodyServices(),
-    updateClaimedCustodyStatus: async (input) => {
+    updatePostCustodyStatus: async (input) => {
       capturedInput = input;
       return {
         post_id: 42,
         item_id: 'item-1',
-        custody_status: 'under_investigation',
+        custody_status: 'with_guard',
         updated_at: '2026-05-14T11:20:00.000Z',
       };
     },
@@ -564,15 +564,15 @@ test('PUT /staff/custody/status passes the authenticated staff to the service', 
     },
     payload: {
       post_id: 42,
-      custody_status: 'under_investigation',
+      custody_status: 'with_guard',
     },
   });
 
   assert.equal(res.statusCode, 200);
   assert.ok(capturedInput);
-  const captured = capturedInput as UpdateClaimedCustodyStatusInput;
+  const captured = capturedInput as UpdatePostCustodyStatusInput;
   assert.equal(captured.post_id, 42);
-  assert.equal(captured.custody_status, 'under_investigation');
+  assert.equal(captured.custody_status, 'with_guard');
   assert.equal(captured.actor.user_id, 'staff-123');
   assert.equal(captured.actor.user_type, 'Staff');
   assert.equal(captured.actor.email, 'staff-123@umak.edu.ph');

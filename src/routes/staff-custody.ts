@@ -5,7 +5,7 @@ import {
   notifyGuardForCustodyFollowUp,
   openCustodyInvestigation,
   reportPhysicalTake,
-  updateClaimedCustodyStatus,
+  updatePostCustodyStatus,
 } from '../services/custody.js';
 import {
   NotifyGuardRequest,
@@ -15,8 +15,8 @@ import {
   PhysicalTakeReportResponse,
   SecurityOfficeReceiptResponse,
   StaffCustodyPostRequest,
-  UpdateClaimedCustodyStatusRequest,
-  UpdateClaimedCustodyStatusResponse,
+  UpdatePostCustodyStatusRequest,
+  UpdatePostCustodyStatusResponse,
 } from '../types/custody.js';
 import { createHttpError } from '../utils/http-error.js';
 
@@ -25,7 +25,7 @@ export interface StaffCustodyRouteServices {
   openCustodyInvestigation: typeof openCustodyInvestigation;
   reportPhysicalTake: typeof reportPhysicalTake;
   notifyGuardForCustodyFollowUp: typeof notifyGuardForCustodyFollowUp;
-  updateClaimedCustodyStatus: typeof updateClaimedCustodyStatus;
+  updatePostCustodyStatus: typeof updatePostCustodyStatus;
 }
 
 interface StaffCustodyRouteOptions {
@@ -37,7 +37,7 @@ const defaultServices: StaffCustodyRouteServices = {
   openCustodyInvestigation,
   reportPhysicalTake,
   notifyGuardForCustodyFollowUp,
-  updateClaimedCustodyStatus,
+  updatePostCustodyStatus,
 };
 
 const postIdBodySchema = {
@@ -66,7 +66,13 @@ const postIdCustodyStatusBodySchema = {
     post_id: { type: 'number' },
     custody_status: {
       type: 'string',
-      enum: ['in_security_office', 'under_investigation', 'claimed_by_student'],
+      enum: [
+        'with_reporter',
+        'with_guard',
+        'in_security_office',
+        'under_investigation',
+        'claimed_by_student',
+      ],
     },
   },
   additionalProperties: false,
@@ -158,7 +164,7 @@ export default async function staffCustodyRoutes(
     }
   );
 
-  server.put<{ Body: UpdateClaimedCustodyStatusRequest }>(
+  server.put<{ Body: UpdatePostCustodyStatusRequest }>(
     '/custody/status',
     {
       preHandler: [requireStaffOnly],
@@ -166,12 +172,12 @@ export default async function staffCustodyRoutes(
         body: postIdCustodyStatusBodySchema,
       },
     },
-    async (request): Promise<UpdateClaimedCustodyStatusResponse> => {
+    async (request): Promise<UpdatePostCustodyStatusResponse> => {
       if (!request.user) {
         throw createHttpError('Unauthorized', 401);
       }
 
-      return services.updateClaimedCustodyStatus({
+      return services.updatePostCustodyStatus({
         actor: request.user,
         ...request.body,
       });

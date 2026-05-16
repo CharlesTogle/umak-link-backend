@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../services/supabase.js';
-import { updateClaimedCustodyStatus } from '../services/custody.js';
+import { updatePostCustodyStatus } from '../services/custody.js';
 import {
   canGuardAccessClaimReview,
   completeClaimVerificationSession,
@@ -11,14 +11,9 @@ import type { VerifiedClaimSubmissionContext } from '../services/claim-verificat
 import { ProcessClaimRequest, ExistingClaimResponse } from '../types/claims.js';
 import logger from '../utils/logger.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
+import { createHttpError, normalizeUpstreamError } from '../utils/http-error.js';
 
 const UMAK_EMAIL_PATTERN = /^[a-zA-Z0-9._-]+@umak\.edu\.ph$/;
-
-function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
-  const error = new Error(message) as Error & { statusCode: number };
-  error.statusCode = statusCode;
-  return error;
-}
 
 function normalizePhoneNumber(input: string): string | null {
   const digits = input.replace(/[^0-9]/g, '');
@@ -30,6 +25,33 @@ function normalizePhoneNumber(input: string): string | null {
 
 function formatPhoneNumber(local: string): string {
   return local.length === 11 ? `${local.slice(0, 4)} ${local.slice(4, 7)} ${local.slice(7)}` : local;
+}
+
+function getClaimVerificationUpdate(
+  actorUserType: string,
+  finalizedVerification: VerifiedClaimSubmissionContext | null
+):
+  | {
+      verification_method: 'manual_staff' | 'staff_qr' | 'guard_qr';
+      verified_claimer_user_id?: string;
+      claim_verification_session_id?: string;
+    }
+  | null {
+  if (finalizedVerification) {
+    return {
+      verified_claimer_user_id: finalizedVerification.verified_claimer.user_id,
+      claim_verification_session_id: finalizedVerification.claim_verification_session_id,
+      verification_method: finalizedVerification.verification_method,
+    };
+  }
+
+  if (actorUserType === 'Guard') {
+    return {
+      verification_method: 'guard_qr',
+    };
+  }
+
+  return null;
 }
 
 interface ClaimableFoundPostRow {
@@ -74,7 +96,7 @@ export interface ClaimsRouteOptions {
   verifyClaimSubmission?: typeof verifyClaimSubmission;
   completeClaimVerificationSession?: typeof completeClaimVerificationSession;
   canGuardAccessClaimReview?: typeof canGuardAccessClaimReview;
-  updateClaimedCustodyStatus?: typeof updateClaimedCustodyStatus;
+  updatePostCustodyStatus?: typeof updatePostCustodyStatus;
 }
 
 async function getProcessedClaimId(
@@ -115,7 +137,11 @@ async function promoteClaimedFoundPostToAccepted(
 
   if (error) {
     logger.error({ error, postId }, 'Failed to promote claimed found post to accepted');
-    throw new Error(error.message || 'Failed to promote claimed found post');
+    throw normalizeUpstreamError(error, {
+      statusCode: 500,
+      message: 'Failed to promote claimed found post',
+      code: 'CLAIM_PROMOTION_FAILED',
+    });
   }
 }
 
@@ -129,7 +155,7 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
     options.completeClaimVerificationSession ?? completeClaimVerificationSession;
   const canGuardAccess = options.canGuardAccessClaimReview ?? canGuardAccessClaimReview;
   const finalizeClaimedCustodyStatus =
-    options.updateClaimedCustodyStatus ?? updateClaimedCustodyStatus;
+    options.updatePostCustodyStatus ?? updatePostCustodyStatus;
 
   // POST /claims/process - Process a claim
   server.post<{ Body: ProcessClaimRequest }>(
@@ -356,7 +382,11 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
 
       if (error) {
         logger.error({ error }, 'Failed to process claim');
-        throw new Error(error.message || 'Failed to process claim');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to process claim',
+          code: 'CLAIM_PROCESS_FAILED',
+        });
       }
 
       const processedClaimId = await getProcessedClaimId(supabase, foundPost.item_id);
@@ -364,15 +394,12 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
       try {
         await promoteClaimedFoundPostToAccepted(supabase, found_post_id, foundPost.post_status);
 
-        if (foundPost.item_id && finalizedVerification) {
+        const claimVerificationUpdate = getClaimVerificationUpdate(actor.user_type, finalizedVerification);
+
+        if (foundPost.item_id && claimVerificationUpdate) {
           const { error: updateClaimError } = await supabase
             .from('claim_table')
-            .update({
-              verified_claimer_user_id: finalizedVerification.verified_claimer.user_id,
-              claim_verification_session_id:
-                finalizedVerification.claim_verification_session_id,
-              verification_method: finalizedVerification.verification_method,
-            })
+            .update(claimVerificationUpdate)
             .eq('item_id', foundPost.item_id);
 
           if (updateClaimError) {
@@ -380,7 +407,11 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
               { error: updateClaimError, itemId: foundPost.item_id },
               'Failed to update verified claim metadata after processing claim'
             );
-            throw new Error(updateClaimError.message || 'Failed to update verified claim metadata');
+            throw normalizeUpstreamError(updateClaimError, {
+              statusCode: 500,
+              message: 'Failed to update verified claim metadata',
+              code: 'CLAIM_METADATA_UPDATE_FAILED',
+            });
           }
         }
 

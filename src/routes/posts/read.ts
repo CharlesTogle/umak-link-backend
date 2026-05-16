@@ -2,12 +2,53 @@ import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../../services/supabase.js';
 import { isStaffOrAdmin, requireAuth, syncAuthoritativeUser } from '../../middleware/auth.js';
 import { canGuardAccessClaimReview } from '../../services/claim-verification.js';
+import type { CustodyStatus } from '../../types/custody.js';
 import { PostListResponse, PostRecord } from '../../types/posts.js';
 import { createHttpError } from '../../utils/http-error.js';
 import logger from '../../utils/logger.js';
 import { parsePagination } from '../../utils/pagination.js';
 
 type SupabaseClientLike = ReturnType<typeof getSupabaseClient>;
+
+interface AttemptCustodyStatusRow {
+  post_id: number | string | null;
+  attempt_number?: number | null;
+  office_received_at?: string | null;
+  investigation_opened_at?: string | null;
+}
+
+function canDeriveGuardCustodyStatus(custodyStatus: string | null | undefined): boolean {
+  return (
+    custodyStatus === null ||
+    custodyStatus === undefined ||
+    custodyStatus === 'untracked' ||
+    custodyStatus === 'with_reporter' ||
+    custodyStatus === 'handover_in_progress' ||
+    custodyStatus === 'with_guard'
+  );
+}
+
+function deriveGuardCustodyStatusFromAttempt(
+  attempt: AttemptCustodyStatusRow | null | undefined
+): CustodyStatus | null {
+  if (!attempt) return null;
+  if (attempt.investigation_opened_at) return 'under_investigation';
+  if (attempt.office_received_at) return 'in_security_office';
+  return null;
+}
+
+function normalizePostId(value: number | string | null | undefined): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  return null;
+}
 
 function normalizeClaimedCustodyStatus<T extends { item_status?: string | null; custody_status?: string | null }>(
   post: T
@@ -71,6 +112,140 @@ async function attachPosterProfileUrls<T extends { poster_id?: string | null }>(
     ...post,
     poster_profile_picture_url: post.poster_id ? profileMap.get(post.poster_id) ?? null : null,
   }));
+}
+
+async function getLatestAttemptCustodyStatuses(
+  supabase: SupabaseClientLike,
+  postIds: number[]
+): Promise<Map<number, AttemptCustodyStatusRow>> {
+  if (postIds.length === 0) return new Map();
+
+  const { data, error } = await supabase
+    .from('custody_attempt_table')
+    .select('post_id, attempt_number, office_received_at, investigation_opened_at')
+    .in('post_id', postIds)
+    .order('attempt_number', { ascending: false });
+
+  if (error || !data) {
+    logger.error({ error, postIds }, 'Failed to derive custody statuses from latest attempts');
+    return new Map();
+  }
+
+  const latestByPostId = new Map<number, AttemptCustodyStatusRow>();
+
+  for (const row of data as AttemptCustodyStatusRow[]) {
+    const postId = normalizePostId(row.post_id);
+    if (!postId || latestByPostId.has(postId)) continue;
+    latestByPostId.set(postId, row);
+  }
+
+  return latestByPostId;
+}
+
+async function attachDerivedGuardCustodyStatuses<
+  T extends { post_id?: number | string | null; item_type?: string | null; custody_status?: string | null },
+>(supabase: SupabaseClientLike, posts: T[]): Promise<T[]> {
+  const postIds = Array.from(
+    new Set(
+      posts
+        .filter((post) => post.item_type === 'found' && canDeriveGuardCustodyStatus(post.custody_status))
+        .map((post) => normalizePostId(post.post_id))
+        .filter((postId): postId is number => postId !== null)
+    )
+  );
+
+  if (postIds.length === 0) return posts;
+
+  const latestByPostId = await getLatestAttemptCustodyStatuses(supabase, postIds);
+
+  return posts.map((post) => {
+    if (post.item_type !== 'found' || !canDeriveGuardCustodyStatus(post.custody_status)) {
+      return post;
+    }
+
+    const postId = normalizePostId(post.post_id);
+    if (!postId) return post;
+
+    const derivedCustodyStatus = deriveGuardCustodyStatusFromAttempt(latestByPostId.get(postId));
+    if (!derivedCustodyStatus || derivedCustodyStatus === post.custody_status) {
+      return post;
+    }
+
+    return {
+      ...post,
+      custody_status: derivedCustodyStatus,
+    };
+  });
+}
+
+async function getUnderInvestigationPostIds(supabase: SupabaseClientLike): Promise<number[]> {
+  const [{ data: persistedPosts, error: persistedError }, { data: investigationAttempts, error: attemptError }] =
+    await Promise.all([
+      supabase.from('post_public_view').select('post_id').eq('custody_status', 'under_investigation'),
+      supabase
+        .from('custody_attempt_table')
+        .select('post_id, attempt_number, office_received_at, investigation_opened_at')
+        .not('investigation_opened_at', 'is', null)
+        .order('attempt_number', { ascending: false }),
+    ]);
+
+  if (persistedError) {
+    logger.error({ error: persistedError }, 'Failed to fetch persisted under-investigation posts');
+    throw new Error('Failed to fetch posts');
+  }
+
+  if (attemptError) {
+    logger.error({ error: attemptError }, 'Failed to derive under-investigation posts from custody attempts');
+    throw new Error('Failed to fetch posts');
+  }
+
+  const postIds = new Set<number>(
+    (persistedPosts ?? [])
+      .map((post) => normalizePostId((post as { post_id?: number | string | null }).post_id))
+      .filter((postId): postId is number => postId !== null)
+  );
+
+  const staleAttemptIds: number[] = [];
+  const seenAttemptPostIds = new Set<number>();
+
+  for (const attempt of (investigationAttempts ?? []) as AttemptCustodyStatusRow[]) {
+    const postId = normalizePostId(attempt.post_id);
+    if (!postId || seenAttemptPostIds.has(postId)) continue;
+    seenAttemptPostIds.add(postId);
+
+    const derivedCustodyStatus = deriveGuardCustodyStatusFromAttempt(attempt);
+    if (derivedCustodyStatus === 'under_investigation') {
+      staleAttemptIds.push(postId);
+    }
+  }
+
+  if (staleAttemptIds.length === 0) {
+    return Array.from(postIds);
+  }
+
+  const { data: stalePosts, error: stalePostsError } = await supabase
+    .from('post_public_view')
+    .select('post_id, item_type, custody_status')
+    .in('post_id', staleAttemptIds);
+
+  if (stalePostsError) {
+    logger.error(
+      { error: stalePostsError, postIds: staleAttemptIds },
+      'Failed to fetch stale under-investigation post candidates'
+    );
+    throw new Error('Failed to fetch posts');
+  }
+
+  for (const post of stalePosts ?? []) {
+    const typedPost = post as { post_id?: number | string | null; item_type?: string | null; custody_status?: string | null };
+    const postId = normalizePostId(typedPost.post_id);
+    if (!postId) continue;
+    if (typedPost.item_type !== 'found') continue;
+    if (!canDeriveGuardCustodyStatus(typedPost.custody_status)) continue;
+    postIds.add(postId);
+  }
+
+  return Array.from(postIds);
 }
 
 async function getPostAccessRecord(supabase: SupabaseClientLike, postId: number) {
@@ -181,6 +356,7 @@ export default async function postsReadRoutes(
       item_type?: 'found' | 'missing';
       status?: string;
       item_status?: string;
+      custody_status?: CustodyStatus;
       poster_id?: string;
       item_id?: string;
       linked_item_id?: string;
@@ -199,6 +375,7 @@ export default async function postsReadRoutes(
       item_type,
       status,
       item_status,
+      custody_status,
       poster_id,
       item_id,
       linked_item_id,
@@ -212,6 +389,8 @@ export default async function postsReadRoutes(
     } = request.query;
 
     const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
+    const underInvestigationPostIds =
+      custody_status === 'under_investigation' ? await getUnderInvestigationPostIds(supabase) : null;
 
     let query = supabase.from('post_public_view').select('*');
 
@@ -236,6 +415,15 @@ export default async function postsReadRoutes(
     }
     if (item_status) {
       query = query.eq('item_status', item_status);
+    }
+    if (custody_status === 'under_investigation') {
+      if (underInvestigationPostIds && underInvestigationPostIds.length > 0) {
+        query = query.in('post_id', underInvestigationPostIds);
+      } else {
+        return { posts: [], count: 0 };
+      }
+    } else if (custody_status) {
+      query = query.eq('custody_status', custody_status);
     }
     if (poster_id && type !== 'own') {
       query = query.eq('poster_id', poster_id);
@@ -311,16 +499,32 @@ export default async function postsReadRoutes(
       if (item_status) {
         countQuery = countQuery.eq('item_status', item_status);
       }
+      if (custody_status === 'under_investigation') {
+        if (underInvestigationPostIds && underInvestigationPostIds.length > 0) {
+          countQuery = countQuery.in('post_id', underInvestigationPostIds);
+        } else {
+          totalCount = 0;
+        }
+      } else if (custody_status) {
+        countQuery = countQuery.eq('custody_status', custody_status);
+      }
 
-      const { count, error: countError } = await countQuery;
-      if (!countError) {
-        totalCount = count || 0;
+      if (totalCount === undefined) {
+        const { count, error: countError } = await countQuery;
+        if (!countError) {
+          totalCount = count || 0;
+        }
       }
     }
 
     const enrichedPosts = await attachPosterProfileUrls(supabase, posts || []);
-    const normalizedPosts = normalizeClaimedCustodyStatuses(enrichedPosts || []);
-    return { posts: normalizedPosts, count: totalCount ?? normalizedPosts.length };
+    const postsWithDerivedCustody = await attachDerivedGuardCustodyStatuses(supabase, enrichedPosts || []);
+    const normalizedPosts = normalizeClaimedCustodyStatuses(postsWithDerivedCustody || []);
+    const filteredPosts =
+      custody_status === 'under_investigation'
+        ? normalizedPosts.filter((post) => post.custody_status === 'under_investigation')
+        : normalizedPosts;
+    return { posts: filteredPosts, count: totalCount ?? filteredPosts.length };
   });
 
   // GET /posts/public - List all public posts (kept for backward compatibility)
@@ -341,7 +545,8 @@ export default async function postsReadRoutes(
     }
 
     const enrichedPosts = await attachPosterProfileUrls(supabase, posts || []);
-    const normalizedPosts = normalizeClaimedCustodyStatuses(enrichedPosts || []);
+    const postsWithDerivedCustody = await attachDerivedGuardCustodyStatuses(supabase, enrichedPosts || []);
+    const normalizedPosts = normalizeClaimedCustodyStatuses(postsWithDerivedCustody || []);
     return { posts: normalizedPosts, count: normalizedPosts.length };
   });
 
@@ -408,7 +613,8 @@ export default async function postsReadRoutes(
     }
 
     const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
-    return normalizeClaimedCustodyStatus(enriched ?? post);
+    const [withDerivedCustody] = await attachDerivedGuardCustodyStatuses(supabase, enriched ? [enriched] : [post]);
+    return normalizeClaimedCustodyStatus(withDerivedCustody ?? enriched ?? post);
   });
 
   // GET /posts/by-item-details/:itemId - Get post record by item ID (from details view)
@@ -428,7 +634,8 @@ export default async function postsReadRoutes(
     }
 
     const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
-    return normalizeClaimedCustodyStatus(enriched ?? post);
+    const [withDerivedCustody] = await attachDerivedGuardCustodyStatuses(supabase, enriched ? [enriched] : [post]);
+    return normalizeClaimedCustodyStatus(withDerivedCustody ?? enriched ?? post);
   });
 
   // GET /posts/:id - Get single post detail
@@ -448,7 +655,8 @@ export default async function postsReadRoutes(
     }
 
     const [enriched] = await attachPosterProfileUrls(supabase, post ? [post] : []);
-    return normalizeClaimedCustodyStatus(enriched ?? post);
+    const [withDerivedCustody] = await attachDerivedGuardCustodyStatuses(supabase, enriched ? [enriched] : [post]);
+    return normalizeClaimedCustodyStatus(withDerivedCustody ?? enriched ?? post);
   });
 
   // GET /posts/:id/full - Get full post details (staff/admin, post owner, or accepted guard)
@@ -495,7 +703,8 @@ export default async function postsReadRoutes(
         throw new Error('Post not found');
       }
 
-      const normalizedPost = normalizeClaimedCustodyStatus(post);
+      const [withDerivedCustody] = await attachDerivedGuardCustodyStatuses(supabase, post ? [post] : []);
+      const normalizedPost = normalizeClaimedCustodyStatus(withDerivedCustody ?? post);
       return attachAcceptedGuardDetails(supabase, normalizedPost);
     }
   );
@@ -526,7 +735,8 @@ export default async function postsReadRoutes(
         throw new Error('Failed to fetch posts');
       }
 
-      const normalizedPosts = normalizeClaimedCustodyStatuses(posts || []);
+      const postsWithDerivedCustody = await attachDerivedGuardCustodyStatuses(supabase, posts || []);
+      const normalizedPosts = normalizeClaimedCustodyStatuses(postsWithDerivedCustody || []);
       return { posts: normalizedPosts, count: normalizedPosts.length };
     }
   );

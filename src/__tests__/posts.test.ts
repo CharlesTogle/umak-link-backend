@@ -675,6 +675,34 @@ test(
         if (table === 'custody_attempt_table') {
           return {
             select(columns: string) {
+              if (columns === 'post_id, attempt_number, office_received_at, investigation_opened_at') {
+                return {
+                  in(column: string, value: number[]) {
+                    assert.equal(column, 'post_id');
+                    assert.deepEqual(value, [42]);
+
+                    return {
+                      async order(orderColumn: string, options: { ascending: boolean }) {
+                        assert.equal(orderColumn, 'attempt_number');
+                        assert.deepEqual(options, { ascending: false });
+
+                        return {
+                          data: [
+                            {
+                              post_id: 42,
+                              attempt_number: 1,
+                              office_received_at: null,
+                              investigation_opened_at: null,
+                            },
+                          ],
+                          error: null,
+                        };
+                      },
+                    };
+                  },
+                };
+              }
+
               return {
                 eq(column: string, value: number | string) {
                   assert.equal(column, 'post_id');

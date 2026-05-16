@@ -15,6 +15,15 @@ export type ClaimedCustodyStatus =
   | 'under_investigation'
   | 'claimed_by_student';
 
+export type UntrackedCustodyStatus =
+  | 'with_reporter'
+  | 'with_guard'
+  | 'in_security_office';
+
+export type EditablePostCustodyStatus =
+  | ClaimedCustodyStatus
+  | UntrackedCustodyStatus;
+
 export type CustodyAttemptStatus =
   | 'open'
   | 'accepted'
@@ -219,14 +228,14 @@ export interface NotifyGuardResponse {
   requested_at: string;
 }
 
-export interface UpdateClaimedCustodyStatusRequest extends StaffCustodyPostRequest {
-  custody_status: ClaimedCustodyStatus;
+export interface UpdatePostCustodyStatusRequest extends StaffCustodyPostRequest {
+  custody_status: EditablePostCustodyStatus;
 }
 
-export interface UpdateClaimedCustodyStatusResponse {
+export interface UpdatePostCustodyStatusResponse {
   post_id: number;
   item_id: string;
-  custody_status: ClaimedCustodyStatus;
+  custody_status: EditablePostCustodyStatus;
   updated_at: string;
 }
 

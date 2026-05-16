@@ -31,8 +31,10 @@ import {
   StaffCustodyPostRequest,
   StudentCustodyHistoryEntry,
   StudentCustodyHistoryResponse,
-  UpdateClaimedCustodyStatusRequest,
-  UpdateClaimedCustodyStatusResponse,
+  UntrackedCustodyStatus,
+  UpdatePostCustodyStatusRequest,
+  UpdatePostCustodyStatusResponse,
+  EditablePostCustodyStatus,
 } from '../types/custody.js';
 
 function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
@@ -241,7 +243,7 @@ export interface NotifyGuardInput extends NotifyGuardRequest {
   actor: CustodyActor;
 }
 
-export interface UpdateClaimedCustodyStatusInput extends UpdateClaimedCustodyStatusRequest {
+export interface UpdatePostCustodyStatusInput extends UpdatePostCustodyStatusRequest {
   actor: CustodyActor;
   details?: Record<string, unknown>;
   occurred_at?: string;
@@ -304,8 +306,18 @@ function isClaimedCustodyStatus(
   );
 }
 
-function getClaimedCustodyRecordType(status: ClaimedCustodyStatus): string {
+function isUntrackedEditableCustodyStatus(
+  status: CustodyStatus | null | undefined
+): status is UntrackedCustodyStatus {
+  return status === 'with_reporter' || status === 'with_guard' || status === 'in_security_office';
+}
+
+function getPostCustodyRecordType(status: EditablePostCustodyStatus): string {
   switch (status) {
+    case 'with_reporter':
+      return 'staff_marked_with_reporter';
+    case 'with_guard':
+      return 'staff_marked_with_guard';
     case 'in_security_office':
       return 'security_office_received';
     case 'under_investigation':
@@ -315,14 +327,18 @@ function getClaimedCustodyRecordType(status: ClaimedCustodyStatus): string {
   }
 }
 
-function getClaimedCustodyAuditAction(status: ClaimedCustodyStatus): string {
+function getPostCustodyAuditAction(status: EditablePostCustodyStatus): string {
   switch (status) {
+    case 'with_reporter':
+      return 'custody_marked_with_reporter';
+    case 'with_guard':
+      return 'custody_marked_with_guard';
     case 'in_security_office':
-      return 'custody_claimed_item_marked_in_security_office';
+      return 'custody_marked_in_security_office';
     case 'under_investigation':
-      return 'custody_claimed_item_marked_under_investigation';
+      return 'custody_marked_under_investigation';
     case 'claimed_by_student':
-      return 'custody_claimed_item_marked_claimed_by_student';
+      return 'custody_marked_claimed_by_student';
   }
 }
 
@@ -350,12 +366,16 @@ function getAuditActorRoleLabel(userType: CustodyActor['user_type']): string {
   }
 }
 
-function getClaimedCustodyStatusMessage(
+function getPostCustodyStatusMessage(
   actorLabel: string,
   postTitle: string,
-  custodyStatus: ClaimedCustodyStatus
+  custodyStatus: EditablePostCustodyStatus
 ): string {
   switch (custodyStatus) {
+    case 'with_reporter':
+      return `${actorLabel} marked ${postTitle} as with the reporter`;
+    case 'with_guard':
+      return `${actorLabel} marked ${postTitle} as with the guard`;
     case 'in_security_office':
       return `${actorLabel} marked ${postTitle} as received in the Security Office`;
     case 'under_investigation':
@@ -652,6 +672,39 @@ async function getItemCustodyStatus(
   }
 
   return (data as ItemCustodyRow).custody_status;
+}
+
+async function persistItemCustodyStatus(
+  supabase: SupabaseClientLike,
+  itemIds: string[],
+  custodyStatus: CustodyStatus,
+  context: { postId?: number; custodyAttemptIds?: string[]; action: string }
+): Promise<void> {
+  const normalizedItemIds = Array.from(new Set(itemIds.filter((itemId) => itemId.trim().length > 0)));
+
+  if (normalizedItemIds.length === 0) {
+    return;
+  }
+
+  const { error } = await supabase
+    .from('item_table')
+    .update({ custody_status: custodyStatus })
+    .in('item_id', normalizedItemIds);
+
+  if (error) {
+    logger.error(
+      {
+        error,
+        itemIds: normalizedItemIds,
+        postId: context.postId,
+        custodyAttemptIds: context.custodyAttemptIds,
+        custodyStatus,
+        action: context.action,
+      },
+      'Failed to persist item custody status'
+    );
+    throw createHttpError('Failed to update item custody status', 500);
+  }
 }
 
 function getRetriesRemaining(numberOfAttempts: number, maxSessionAttempts: number): number {
@@ -1923,6 +1976,14 @@ export async function getStudentCustodyHistory(
     let message: string | null = null;
 
     switch (record.record_type) {
+      case 'staff_marked_with_reporter':
+        eventType = 'item_reported';
+        message = 'Item is with the reporter';
+        break;
+      case 'staff_marked_with_guard':
+        eventType = 'guard_accepted';
+        message = 'Item is with the guard';
+        break;
       case 'attempt_started':
         eventType = 'handover_attempted';
         message = `Guard handover attempted at ${locationLabel}`;
@@ -2061,6 +2122,12 @@ export async function markPostReceivedInSecurityOffice(
     throw createHttpError('Failed to mark item as received in the Security Office', 500);
   }
 
+  await persistItemCustodyStatus(supabase, [acceptedAttempt.item_id], 'in_security_office', {
+    postId: input.post_id,
+    custodyAttemptIds: [acceptedAttempt.custody_attempt_id],
+    action: 'markPostReceivedInSecurityOffice',
+  });
+
   await insertCustodyRecords(supabase, [
     {
       post_id: acceptedAttempt.post_id,
@@ -2088,6 +2155,7 @@ export async function markPostReceivedInSecurityOffice(
     recordId: acceptedAttempt.custody_attempt_id,
     details: {
       message: `${actorLabel} received ${postTitle} in the Security Office`,
+      item_name: postRow.item_name ?? 'Unknown Item',
       post_title: postTitle,
       post_id: acceptedAttempt.post_id,
       item_id: acceptedAttempt.item_id,
@@ -2152,6 +2220,12 @@ export async function openCustodyInvestigation(
     throw createHttpError('Failed to open custody investigation', 500);
   }
 
+  await persistItemCustodyStatus(supabase, [latestAttempt.item_id], 'under_investigation', {
+    postId: input.post_id,
+    custodyAttemptIds: [latestAttempt.custody_attempt_id],
+    action: 'openCustodyInvestigation',
+  });
+
   await insertCustodyRecords(supabase, [
     {
       post_id: latestAttempt.post_id,
@@ -2194,17 +2268,13 @@ export async function openCustodyInvestigation(
   };
 }
 
-export async function updateClaimedCustodyStatus(
-  input: UpdateClaimedCustodyStatusInput,
+export async function updatePostCustodyStatus(
+  input: UpdatePostCustodyStatusInput,
   deps?: CustodyServiceDependencies
-): Promise<UpdateClaimedCustodyStatusResponse> {
+): Promise<UpdatePostCustodyStatusResponse> {
   const { getSupabase, now, auditLogger } = resolveDependencies(deps);
   const supabase = getSupabase();
   const timestamp = input.occurred_at ?? now().toISOString();
-
-  if (!isClaimedCustodyStatus(input.custody_status)) {
-    throw createHttpError('Invalid claimed custody status', 400);
-  }
 
   const postRow = await getPostCustodyAccessRow(
     supabase,
@@ -2216,12 +2286,29 @@ export async function updateClaimedCustodyStatus(
     throw createHttpError('Custody flow only applies to found items', 400);
   }
 
-  if ((postRow.item_status ?? '').toLowerCase() !== 'claimed') {
-    throw createHttpError('Only claimed found items can update custody status', 409);
-  }
-
   const currentCustodyStatus =
     postRow.custody_status ?? (await getItemCustodyStatus(supabase, postRow.item_id));
+  const isClaimedFoundItem = (postRow.item_status ?? '').toLowerCase() === 'claimed';
+  const isUntrackedFoundItem = currentCustodyStatus === 'untracked';
+
+  if (isUntrackedFoundItem) {
+    if (!isUntrackedEditableCustodyStatus(input.custody_status)) {
+      throw createHttpError(
+        'Untracked found items can update custody status only to with reporter, with guard, or in security office',
+        409
+      );
+    }
+  } else if (isClaimedFoundItem) {
+    if (!isClaimedCustodyStatus(input.custody_status)) {
+      throw createHttpError(
+        'Claimed found items can update custody status only to in security office, under investigation, or claimed by student',
+        409
+      );
+    }
+  } else {
+    throw createHttpError('Only claimed found items or untracked found items can update custody status', 409);
+  }
+
   if (currentCustodyStatus === input.custody_status) {
     return {
       post_id: postRow.post_id,
@@ -2244,9 +2331,9 @@ export async function updateClaimedCustodyStatus(
         itemId: postRow.item_id,
         custodyStatus: input.custody_status,
       },
-      'Failed to update claimed item custody status'
+      'Failed to update post custody status'
     );
-    throw createHttpError('Failed to update claimed item custody status', 500);
+    throw createHttpError('Failed to update post custody status', 500);
   }
 
   await insertCustodyRecords(supabase, [
@@ -2257,7 +2344,7 @@ export async function updateClaimedCustodyStatus(
       qr_code_session_id: null,
       guard_post_id: null,
       actor_user_id: input.actor.user_id,
-      record_type: getClaimedCustodyRecordType(input.custody_status),
+      record_type: getPostCustodyRecordType(input.custody_status),
       visible_to_poster: true,
       details: {
         previous_custody_status: currentCustodyStatus,
@@ -2273,11 +2360,11 @@ export async function updateClaimedCustodyStatus(
 
   await auditLogger({
     userId: input.actor.user_id,
-    actionType: getClaimedCustodyAuditAction(input.custody_status),
+    actionType: getPostCustodyAuditAction(input.custody_status),
     tableName: 'item_table',
     recordId: postRow.item_id,
     details: {
-      message: getClaimedCustodyStatusMessage(actorLabel, postTitle, input.custody_status),
+      message: getPostCustodyStatusMessage(actorLabel, postTitle, input.custody_status),
       post_title: postTitle,
       post_id: postRow.post_id,
       item_id: postRow.item_id,
@@ -2584,7 +2671,7 @@ export async function scanCustodySession(
   }
 
   if (isFirstGuardScan) {
-    const actorLabel = await getAuditActorLabel(supabase, input.actor);
+    const guardName = await getAuditActorName(supabase, input.actor);
     const postTitle = await getAuditPostTitle(
       supabase,
       attempt.post_id,
@@ -2597,7 +2684,9 @@ export async function scanCustodySession(
       tableName: 'qr_code_session_table',
       recordId: session.qr_code_session_id,
       details: {
-        message: `${actorLabel} scanned the custody QR for ${postTitle}`,
+        message: 'Handover QR Code Scanned',
+        guard_name: guardName,
+        item_name: (postDetails as GuardPostDetailsRow).item_name,
         post_title: postTitle,
         custody_attempt_id: attempt.custody_attempt_id,
         post_id: attempt.post_id,
@@ -2734,7 +2823,9 @@ export async function decideCustodyAttempt(
   ]);
 
   const actorLabel = await getAuditActorLabel(supabase, input.actor);
+  const guardName = await getAuditActorName(supabase, input.actor);
   const postTitle = await getAuditPostTitle(supabase, attempt.post_id);
+  const actionLabel = input.decision === 'accepted' ? 'Accepted Handover' : 'Rejected Handover';
 
   await auditLogger({
     userId: input.actor.user_id,
@@ -2742,7 +2833,9 @@ export async function decideCustodyAttempt(
     tableName: 'custody_attempt_table',
     recordId: attempt.custody_attempt_id,
     details: {
-      message: `${actorLabel} ${input.decision} ${postTitle}`,
+      message: `${actorLabel} ${actionLabel}`,
+      guard_name: guardName,
+      item_name: postTitle,
       post_title: postTitle,
       qr_code_session_id: session.qr_code_session_id,
       post_id: attempt.post_id,
@@ -2842,6 +2935,16 @@ export async function escalateStaleAcceptedCustodyAttempts(
     );
     throw createHttpError('Failed to escalate stale accepted custody attempts', 500);
   }
+
+  await persistItemCustodyStatus(
+    supabase,
+    staleAttempts.map((attempt) => attempt.item_id),
+    'under_investigation',
+    {
+      custodyAttemptIds,
+      action: 'escalateStaleAcceptedCustodyAttempts',
+    }
+  );
 
   await insertCustodyRecords(
     supabase,

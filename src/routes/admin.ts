@@ -337,6 +337,7 @@ export default async function adminRoutes(server: FastifyInstance) {
         record_id: log.log_id,
         changes: log.details,
         timestamp: log.timestamp,
+        timestamp_local: log.timestamp_local,
         user_table: {
           user_id: log.user_id,
           user_name: log.user_name,
@@ -388,6 +389,7 @@ export default async function adminRoutes(server: FastifyInstance) {
         record_id: log.log_id,
         changes: log.details,
         timestamp: log.timestamp,
+        timestamp_local: log.timestamp_local,
         user_table: {
           user_id: log.user_id,
           user_name: log.user_name,
@@ -449,6 +451,7 @@ export default async function adminRoutes(server: FastifyInstance) {
         record_id: log.log_id,
         changes: log.details,
         timestamp: log.timestamp,
+        timestamp_local: log.timestamp_local,
         user_table: {
           user_id: log.user_id,
           user_name: log.user_name,
@@ -518,6 +521,7 @@ export default async function adminRoutes(server: FastifyInstance) {
         record_id: log.log_id,
         changes: log.details,
         timestamp: log.timestamp,
+        timestamp_local: log.timestamp_local,
         user_table: {
           user_id: log.user_id,
           user_name: log.user_name,

@@ -22,9 +22,16 @@ type UnreadNotificationRow = {
 };
 
 type NotificationsRouteSupabaseClient = Pick<ReturnType<typeof getSupabaseClient>, 'from'>;
+type RecipientMetadataRow = {
+  user_name?: string | null;
+  email?: string | null;
+};
 
 interface NotificationsRouteServices {
   getSupabaseClient: () => NotificationsRouteSupabaseClient;
+  createNotification: typeof createNotification;
+  logAudit: typeof logAudit;
+  getUserName: typeof getUserName;
 }
 
 interface NotificationsRouteOptions {
@@ -33,6 +40,9 @@ interface NotificationsRouteOptions {
 
 const defaultServices: NotificationsRouteServices = {
   getSupabaseClient,
+  createNotification,
+  logAudit,
+  getUserName,
 };
 
 function isMissingColumnError(error: unknown, column: string): boolean {
@@ -57,6 +67,34 @@ function createHttpError(message: string, statusCode: number): Error & { statusC
   const error = new Error(message) as Error & { statusCode: number };
   error.statusCode = statusCode;
   return error;
+}
+
+async function getNotificationRecipientName(
+  supabase: NotificationsRouteSupabaseClient,
+  userId: string
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('user_table')
+      .select('user_name, email')
+      .eq('user_id', userId)
+      .single();
+
+    if (error || !data) {
+      return null;
+    }
+
+    const recipient = data as RecipientMetadataRow;
+    const userName = recipient.user_name?.trim();
+    if (userName && userName.length > 0) {
+      return userName;
+    }
+
+    const email = recipient.email?.trim();
+    return email && email.length > 0 ? email : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeNotificationData(
@@ -126,7 +164,7 @@ export default async function notificationsRoutes(
     async (request) => {
       const staffId = request.user?.user_id;
 
-      const notificationId = await createNotification({
+      const notificationId = await services.createNotification({
         ...request.body,
         sent_by: staffId ?? null,
       });
@@ -137,18 +175,24 @@ export default async function notificationsRoutes(
 
       // Log to audit trail
       if (staffId) {
-        const staffName = await getUserName(staffId);
+        const staffName = await services.getUserName(staffId);
+        const recipientName = await getNotificationRecipientName(
+          services.getSupabaseClient(),
+          request.body.user_id
+        );
 
-        await logAudit({
+        await services.logAudit({
           userId: staffId,
           actionType: 'notification_sent',
           details: {
             message: `${staffName} sent notification to user`,
+            timestamp: new Date().toISOString(),
             notification_id: notificationId.toString(),
+            notification_type: request.body.type,
+            recipient_name: recipientName ?? request.body.user_id,
             recipient_user_id: request.body.user_id,
             notification_title: request.body.title,
-            notification_type: request.body.type,
-            timestamp: new Date().toISOString(),
+            content: request.body.body,
           },
           recordId: notificationId.toString(),
         });

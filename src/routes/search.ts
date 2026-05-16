@@ -68,7 +68,7 @@ export default async function searchRoutes(server: FastifyInstance) {
   server.post<{ Body: ReverseImageQueryBody }>(
     '/image-query',
     {
-      preHandler: [requireStaff],
+      preHandler: [requireAuth],
       schema: {
         body: {
           type: 'object',

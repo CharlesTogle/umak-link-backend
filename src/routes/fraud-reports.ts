@@ -7,66 +7,10 @@ import {
   FraudReportResolveRequest,
   FraudReportStatus,
 } from '../types/fraud-reports.js';
-import { sendEmail } from '../services/email.js';
 import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
-
-function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
-  const error = new Error(message) as Error & { statusCode: number };
-  error.statusCode = statusCode;
-  return error;
-}
-
-function buildFraudReportOpenedEmail(params: {
-  claimerName: string;
-  postTitle: string;
-  reporterName: string;
-  staffName: string;
-}) {
-  const acceptedDate = new Date().toLocaleString('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'Asia/Manila',
-  });
-
-  return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Item Claim Report - Action Required</title>
-</head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;">
-  <div style="max-width:600px;margin:0 auto;background:#ffffff;">
-    <div style="background:#1e2b87;color:#ffffff;padding:30px 20px;text-align:center;">
-      <h1 style="margin:0;font-size:24px;">Item Claim Report - Action Required</h1>
-    </div>
-    <div style="padding:32px 28px;color:#333333;line-height:1.6;">
-      <h2 style="color:#1e2b87;margin-top:0;">Dear ${params.claimerName},</h2>
-      <p>An item you claimed through UMak-LINK has been reported as a potentially fraudulent claim.</p>
-      <div style="background:#f8f9fa;border-left:4px solid #1e2b87;padding:16px 20px;margin:20px 0;">
-        <p style="margin:6px 0;"><strong>Claimed Item:</strong> ${params.postTitle}</p>
-        <p style="margin:6px 0;"><strong>Reported By:</strong> ${params.reporterName}</p>
-        <p style="margin:6px 0;"><strong>Reviewed By:</strong> ${params.staffName}</p>
-        <p style="margin:6px 0;"><strong>Date Reviewed:</strong> ${acceptedDate}</p>
-      </div>
-      <div style="background:#f8d7da;border-left:4px solid #dc3545;padding:16px 20px;margin:20px 0;">
-        <strong>Immediate action required.</strong>
-        <p style="margin:10px 0 0;">Please report to the UMak Security Office within one week and bring proof of ownership for the claimed item.</p>
-      </div>
-      <p>Failure to appear may result in the case being escalated for further disciplinary action.</p>
-      <p style="margin-top:28px;">UMak Security Office<br />University of Makati</p>
-    </div>
-  </div>
-</body>
-</html>
-  `.trim();
-}
+import { createHttpError, normalizeUpstreamError } from '../utils/http-error.js';
 
 export default async function fraudReportsRoutes(server: FastifyInstance) {
   // GET /fraud-reports/check-duplicates - Check for duplicate reports
@@ -184,7 +128,11 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error }, 'Failed to create fraud report');
-        throw new Error(error.message || 'Failed to create fraud report');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to create fraud report',
+          code: 'FRAUD_REPORT_CREATE_FAILED',
+        });
       }
 
       logger.info({ reportId: data }, 'Fraud report created');
@@ -365,7 +313,11 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error, reportId }, 'Failed to update fraud report status');
-        throw new Error(error.message || 'Failed to update status');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to update fraud report status',
+          code: 'FRAUD_REPORT_STATUS_UPDATE_FAILED',
+        });
       }
 
       if (status === 'rejected') {
@@ -376,29 +328,11 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
         if (restorePostError) {
           logger.error({ error: restorePostError, reportId }, 'Failed to restore post status after fraud report rejection');
-          throw new Error(restorePostError.message || 'Failed to restore post status');
-        }
-      }
-
-      if (status === 'open' && reportData.claimer_school_email && reportData.claimer_name) {
-        const staffName = await getUserName(staffId);
-        const emailResult = await sendEmail({
-          to: reportData.claimer_school_email,
-          subject: `URGENT: Claim Verification Required - ${reportData.item_name || 'Claimed Item'}`,
-          html: buildFraudReportOpenedEmail({
-            claimerName: reportData.claimer_name,
-            postTitle: reportData.item_name || 'Claimed Item',
-            reporterName: reportData.reporter_name || 'the reporter',
-            staffName,
-          }),
-          senderUuid: staffId,
-        });
-
-        if (!emailResult.success) {
-          logger.warn(
-            { reportId, staffId, to: reportData.claimer_school_email, error: emailResult.error },
-            'Failed to send fraud report opened email to claimer'
-          );
+          throw normalizeUpstreamError(restorePostError, {
+            statusCode: 500,
+            message: 'Failed to restore post status',
+            code: 'FRAUD_REPORT_POST_RESTORE_FAILED',
+          });
         }
       }
 
@@ -485,7 +419,11 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error, reportId }, 'Failed to resolve fraud report');
-        throw new Error(error.message || 'Failed to resolve fraud report');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to resolve fraud report',
+          code: 'FRAUD_REPORT_RESOLVE_FAILED',
+        });
       }
 
       if (Array.isArray(data) && data[0] && data[0].success === false) {
@@ -550,7 +488,11 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error, reportId }, 'Failed to delete fraud report');
-        throw new Error(error.message || 'Failed to delete fraud report');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to delete fraud report',
+          code: 'FRAUD_REPORT_DELETE_FAILED',
+        });
       }
 
       const staffName = await getUserName(staffId);

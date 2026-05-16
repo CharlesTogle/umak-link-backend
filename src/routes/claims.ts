@@ -124,7 +124,8 @@ async function getProcessedClaimId(
 async function promoteClaimedFoundPostToAccepted(
   supabase: SupabaseClientLike,
   postId: number,
-  currentStatus: string | null
+  currentStatus: string | null,
+  contextLabel = 'claimed found post'
 ): Promise<void> {
   if ((currentStatus ?? '').toLowerCase() !== 'pending') {
     return;
@@ -136,10 +137,10 @@ async function promoteClaimedFoundPostToAccepted(
     .eq('post_id', postId);
 
   if (error) {
-    logger.error({ error, postId }, 'Failed to promote claimed found post to accepted');
+    logger.error({ error, postId }, `Failed to promote ${contextLabel} to accepted`);
     throw normalizeUpstreamError(error, {
       statusCode: 500,
-      message: 'Failed to promote claimed found post',
+      message: `Failed to promote ${contextLabel}`,
       code: 'CLAIM_PROMOTION_FAILED',
     });
   }
@@ -295,6 +296,7 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
         throw createHttpError('Guard claims cannot link a lost post.', 400);
       }
 
+      let linkedMissingPostStatus: string | null = null;
       if (!isGuardClaim && missing_post_id !== undefined && missing_post_id !== null) {
         const { data: missingPostData, error: missingPostError } = await supabase
           .from('post_public_view')
@@ -312,14 +314,28 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
           throw createHttpError('This is a Found item post. Please enter a Missing item ID instead.', 400);
         }
 
-        if (missingPost.post_status !== 'accepted') {
-          throw createHttpError('This post is not accepted yet. Only accepted posts can be claimed.', 400);
+        const normalizedMissingPostStatus = (missingPost.post_status ?? '').toLowerCase();
+        const normalizedMissingItemStatus = (missingPost.item_status ?? '').toLowerCase();
+
+        if (normalizedMissingItemStatus === 'discarded') {
+          throw createHttpError('This item cannot be linked because it was discarded.', 400);
         }
 
-        if (missingPost.item_status === 'returned') {
+        if (normalizedMissingItemStatus === 'returned') {
           throw createHttpError('This item has already been returned and cannot be linked.', 400);
         }
 
+        if (
+          normalizedMissingPostStatus !== 'accepted' &&
+          normalizedMissingPostStatus !== 'pending'
+        ) {
+          throw createHttpError(
+            'This post cannot be linked unless it is pending or accepted.',
+            400
+          );
+        }
+
+        linkedMissingPostStatus = missingPost.post_status;
       }
       const effectiveMissingPostId = isGuardClaim ? null : (missing_post_id ?? null);
 
@@ -393,6 +409,14 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
 
       try {
         await promoteClaimedFoundPostToAccepted(supabase, found_post_id, foundPost.post_status);
+        if (effectiveMissingPostId !== null) {
+          await promoteClaimedFoundPostToAccepted(
+            supabase,
+            effectiveMissingPostId,
+            linkedMissingPostStatus,
+            'linked missing post'
+          );
+        }
 
         const claimVerificationUpdate = getClaimVerificationUpdate(actor.user_type, finalizedVerification);
 

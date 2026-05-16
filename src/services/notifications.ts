@@ -422,7 +422,7 @@ export async function sendGlobalAnnouncement(
   description: string | null,
   imageUrl: string | null,
   senderId: string
-): Promise<boolean> {
+): Promise<{ announcementId: number; createdAt: string } | null> {
   const supabase = getSupabaseClient();
 
   try {
@@ -462,13 +462,13 @@ export async function sendGlobalAnnouncement(
 
     if (announcementError) {
       logger.error({ error: announcementError }, 'Failed to create announcement');
-      return false;
+      return null;
     }
 
     const announcementId = announcement.id as number | undefined;
     if (!announcementId) {
       logger.error({ announcement }, 'Announcement insert did not return an ID');
-      return false;
+      return null;
     }
 
     // Create in-app notifications for every user so announcements appear in the portal.
@@ -479,7 +479,7 @@ export async function sendGlobalAnnouncement(
 
     if (usersError) {
       logger.error({ error: usersError }, 'Failed to fetch users for announcement');
-      return false;
+      return null;
     }
 
     const recipientUsers = (users || []).filter((user) => user.user_id && user.user_id !== senderId);
@@ -528,9 +528,12 @@ export async function sendGlobalAnnouncement(
       excludedSenderId: senderId,
     }, 'Global announcement sent');
 
-    return true;
+    return {
+      announcementId,
+      createdAt,
+    };
   } catch (error) {
     logger.error({ error }, 'Error in sendGlobalAnnouncement');
-    return false;
+    return null;
   }
 }

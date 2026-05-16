@@ -374,7 +374,7 @@ export default async function searchRoutes(server: FastifyInstance) {
           userId: staffId,
           actionType: 'match_attempt',
           details: {
-            message: `${staffName} initiated match generation for post ${itemName}`,
+            message: `${staffName} generated ${filteredMatches.length} possible matches for ${itemName}`,
             post_id: post_id,
             item_name: itemName,
             matches_found: filteredMatches.length,

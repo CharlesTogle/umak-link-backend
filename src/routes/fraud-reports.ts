@@ -12,6 +12,15 @@ import { parsePagination } from '../utils/pagination.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
 import { createHttpError, normalizeUpstreamError } from '../utils/http-error.js';
 
+function formatAuditLabel(value: string | null | undefined): string {
+  if (!value) return 'Unknown';
+
+  return value
+    .split('_')
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ');
+}
+
 export default async function fraudReportsRoutes(server: FastifyInstance) {
   // GET /fraud-reports/check-duplicates - Check for duplicate reports
   server.get<{
@@ -338,6 +347,8 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
 
       // Log to audit trail
       const staffName = await getUserName(staffId);
+      const timestamp = new Date().toISOString();
+      const deleteClaim = false;
 
       let actionType = '';
       let message = '';
@@ -350,10 +361,10 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         message = `${staffName} rejected fraud report ${reportId}`;
       } else if (status === 'open') {
         actionType = 'fraud_report_marked_open';
-        message = `${staffName} marked fraud report ${reportId} as open`;
+        message = `${staffName} opened fraud report ${reportId}`;
       } else {
         actionType = 'fraud_report_status_changed';
-        message = `${staffName} changed fraud report status to ${status}`;
+        message = `${staffName} changed fraud report ${reportId} to ${formatAuditLabel(status)}`;
       }
 
       await logAudit({
@@ -365,7 +376,9 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
           post_id: reportData.post_id?.toString(),
           old_status: reportData.report_status,
           new_status: status,
-          timestamp: new Date().toISOString(),
+          delete_claim: status === 'resolved' ? deleteClaim : undefined,
+          resolved_at: status === 'resolved' ? timestamp : undefined,
+          timestamp,
         },
         recordId: reportId,
       });
@@ -437,7 +450,9 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         userId: staffId,
         actionType: 'fraud_report_resolved',
         details: {
-          message: `${staffName} resolved fraud report ${reportId}${delete_claim ? ' and deleted the claim' : ''}`,
+          message: delete_claim
+            ? `${staffName} resolved fraud report ${reportId} and removed the linked claim`
+            : `${staffName} resolved fraud report ${reportId}`,
           report_id: reportId,
           post_id: reportData.post_id?.toString(),
           delete_claim: delete_claim || false,

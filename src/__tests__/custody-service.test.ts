@@ -941,7 +941,7 @@ test('updatePostCustodyStatus updates claimed found item custody and writes post
   ]);
 
   assert.deepEqual(capturedAuditDetails, {
-    message: 'Staff Alyssa Ramos marked Canvas Tote Bag under investigation',
+    message: 'Staff Alyssa Ramos marked Canvas Tote Bag as under investigation',
     post_title: 'Canvas Tote Bag',
     post_id: 42,
     item_id: 'item-1',
@@ -1340,7 +1340,7 @@ test('updatePostCustodyStatus updates untracked found item custody with the allo
   ]);
 
   assert.deepEqual(capturedAuditDetails, {
-    message: 'Staff Alyssa Ramos marked Canvas Tote Bag as with the guard',
+    message: 'Staff Alyssa Ramos marked Canvas Tote Bag as in guard custody',
     post_title: 'Canvas Tote Bag',
     post_id: 42,
     item_id: 'item-1',
@@ -1957,7 +1957,7 @@ test('escalateStaleAcceptedCustodyAttempts opens investigations for accepted han
   });
   assert.equal(auditDetails.length, 2);
   assert.deepEqual(auditDetails[0], {
-    message: 'Staff Automated Custody auto-opened a custody investigation for Canvas Tote Bag',
+    message: 'Automation opened a custody investigation for Canvas Tote Bag after 48 hours',
     post_title: 'Canvas Tote Bag',
     post_id: 42,
     item_id: 'item-1',

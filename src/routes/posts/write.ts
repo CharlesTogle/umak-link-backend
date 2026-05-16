@@ -414,15 +414,18 @@ export default async function postsWriteRoutes(
       if (userId && request.user?.user_type && ['Staff', 'Admin'].includes(request.user.user_type)) {
         const staffName = await getUserName(userId);
         const itemName = postData?.item_name || 'Unknown Item';
+        const deletedAt = new Date().toISOString();
 
         await logAudit({
           userId,
           actionType: 'post_deleted',
           details: {
-            message: `${staffName} deleted the post ${itemName}`,
+            message: `${staffName} deleted the post: ${itemName}`,
             post_id: postId.toString(),
             item_name: itemName,
-            deleted_at: new Date().toISOString(),
+            new_status: 'deleted',
+            deleted_at: deletedAt,
+            timestamp: deletedAt,
           },
           recordId: postId.toString(),
         });

@@ -42,6 +42,15 @@ function normalizeDiscardReason(reason: string | undefined): string | null {
   return trimmedReason.length > 0 ? trimmedReason : null;
 }
 
+function formatAuditLabel(value: string | null | undefined): string {
+  if (!value) return 'Unknown';
+
+  return value
+    .split('_')
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ');
+}
+
 async function recomputeFoundItemCustodyStatus(
   supabase: SupabaseClientLike,
   postId: number,
@@ -132,22 +141,23 @@ export default async function postsStatusRoutes(
       if (staffId && postData) {
         const staffName = await getAuditUserName(staffId);
         const itemName = postData.item_name || 'Unknown Item';
+        const timestamp = new Date().toISOString();
 
         let actionType = '';
         let message = '';
 
         if (status === 'accepted') {
           actionType = 'post_accepted';
-          message = `${staffName} accepted the post ${itemName}`;
+          message = `${staffName} accepted the post: ${itemName}`;
         } else if (status === 'rejected') {
           actionType = 'post_rejected';
-          message = `${staffName} rejected the post ${itemName}`;
+          message = `${staffName} rejected post "${itemName}"`;
         } else if (status === 'deleted') {
           actionType = 'post_deleted';
-          message = `${staffName} deleted the post ${itemName}`;
+          message = `${staffName} deleted the post: ${itemName}`;
         } else {
           actionType = 'post_status_changed';
-          message = `${staffName} changed post status to ${status} for ${itemName}`;
+          message = `${staffName} changed the post status for ${itemName} to ${formatAuditLabel(status)}`;
         }
 
         await auditLogger({
@@ -158,8 +168,9 @@ export default async function postsStatusRoutes(
             post_id: postId.toString(),
             item_name: itemName,
             new_status: status,
+            deleted_at: status === 'deleted' ? timestamp : undefined,
             rejection_reason: rejection_reason || undefined,
-            timestamp: new Date().toISOString(),
+            timestamp,
           },
           recordId: postId.toString(),
         });
@@ -339,8 +350,8 @@ export default async function postsStatusRoutes(
         const itemName = itemRow.item_name || discardedRecord?.item_name || 'Unknown Item';
         const auditMessage =
           isDiscardTransition && normalizedDiscardReason
-            ? `${staffName} changed item status from ${oldStatus} to ${status} for ${itemName}. Disposition: ${normalizedDiscardReason}`
-            : `${staffName} changed item status from ${oldStatus} to ${status} for ${itemName}`;
+            ? `${staffName} discarded ${itemName}. Reason: ${normalizedDiscardReason}`
+            : `${staffName} changed ${itemName} from ${formatAuditLabel(oldStatus)} to ${formatAuditLabel(status)}`;
 
         await auditLogger({
           userId: staffId,

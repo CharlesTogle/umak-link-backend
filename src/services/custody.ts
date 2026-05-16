@@ -373,15 +373,15 @@ function getPostCustodyStatusMessage(
 ): string {
   switch (custodyStatus) {
     case 'with_reporter':
-      return `${actorLabel} marked ${postTitle} as with the reporter`;
+      return `${actorLabel} marked ${postTitle} as held by the reporter`;
     case 'with_guard':
-      return `${actorLabel} marked ${postTitle} as with the guard`;
+      return `${actorLabel} marked ${postTitle} as in guard custody`;
     case 'in_security_office':
       return `${actorLabel} marked ${postTitle} as received in the Security Office`;
     case 'under_investigation':
-      return `${actorLabel} marked ${postTitle} under investigation`;
+      return `${actorLabel} marked ${postTitle} as under investigation`;
     case 'claimed_by_student':
-      return `${actorLabel} marked ${postTitle} as claimed by student`;
+      return `${actorLabel} marked ${postTitle} as claimed by the student`;
   }
 }
 
@@ -1072,7 +1072,7 @@ async function finalizeTimedOutSession(
       tableName: 'qr_code_session_table',
       recordId: session.qr_code_session_id,
       details: {
-        message: `Custody handover session expired for ${postTitle}`,
+        message: `Handover session expired for ${postTitle}`,
         post_title: postTitle,
         qr_code_session_id: session.qr_code_session_id,
         custody_attempt_id: attempt.custody_attempt_id,
@@ -2145,7 +2145,6 @@ export async function markPostReceivedInSecurityOffice(
     },
   ]);
 
-  const actorLabel = await getAuditActorLabel(supabase, input.actor);
   const postTitle = await getAuditPostTitle(supabase, acceptedAttempt.post_id, postRow.item_name);
 
   await auditLogger({
@@ -2154,7 +2153,7 @@ export async function markPostReceivedInSecurityOffice(
     tableName: 'custody_attempt_table',
     recordId: acceptedAttempt.custody_attempt_id,
     details: {
-      message: `${actorLabel} received ${postTitle} in the Security Office`,
+      message: `Security Office received ${postRow.item_name ?? 'Unknown Item'}`,
       item_name: postRow.item_name ?? 'Unknown Item',
       post_title: postTitle,
       post_id: acceptedAttempt.post_id,
@@ -2436,7 +2435,7 @@ export async function reportPhysicalTake(
     tableName: 'custody_record_table',
     recordId: latestAttempt.custody_attempt_id,
     details: {
-      message: `${actorLabel} reported a physical take for ${postTitle}`,
+      message: `${actorLabel} reported a possible unauthorised handover of ${postTitle}`,
       post_title: postTitle,
       post_id: latestAttempt.post_id,
       item_id: latestAttempt.item_id,
@@ -2672,6 +2671,7 @@ export async function scanCustodySession(
 
   if (isFirstGuardScan) {
     const guardName = await getAuditActorName(supabase, input.actor);
+    const itemName = (postDetails as GuardPostDetailsRow).item_name ?? 'Unknown Item';
     const postTitle = await getAuditPostTitle(
       supabase,
       attempt.post_id,
@@ -2684,9 +2684,9 @@ export async function scanCustodySession(
       tableName: 'qr_code_session_table',
       recordId: session.qr_code_session_id,
       details: {
-        message: 'Handover QR Code Scanned',
+        message: `Guard ${guardName} scanned the handover QR for ${itemName}`,
         guard_name: guardName,
-        item_name: (postDetails as GuardPostDetailsRow).item_name,
+        item_name: itemName,
         post_title: postTitle,
         custody_attempt_id: attempt.custody_attempt_id,
         post_id: attempt.post_id,
@@ -2822,10 +2822,8 @@ export async function decideCustodyAttempt(
     },
   ]);
 
-  const actorLabel = await getAuditActorLabel(supabase, input.actor);
   const guardName = await getAuditActorName(supabase, input.actor);
   const postTitle = await getAuditPostTitle(supabase, attempt.post_id);
-  const actionLabel = input.decision === 'accepted' ? 'Accepted Handover' : 'Rejected Handover';
 
   await auditLogger({
     userId: input.actor.user_id,
@@ -2833,7 +2831,10 @@ export async function decideCustodyAttempt(
     tableName: 'custody_attempt_table',
     recordId: attempt.custody_attempt_id,
     details: {
-      message: `${actorLabel} ${actionLabel}`,
+      message:
+        input.decision === 'accepted'
+          ? `Guard ${guardName} accepted the handover for ${postTitle}`
+          : `Guard ${guardName} rejected the handover for ${postTitle}`,
       guard_name: guardName,
       item_name: postTitle,
       post_title: postTitle,
@@ -2969,7 +2970,6 @@ export async function escalateStaleAcceptedCustodyAttempts(
 
   await Promise.all(
     staleAttempts.map(async (attempt) => {
-      const actorLabel = await getAuditActorLabel(supabase, automationActor);
       const postTitle = await getAuditPostTitle(supabase, attempt.post_id);
 
       await auditLogger({
@@ -2978,7 +2978,7 @@ export async function escalateStaleAcceptedCustodyAttempts(
         tableName: 'custody_attempt_table',
         recordId: attempt.custody_attempt_id,
         details: {
-          message: `${actorLabel} auto-opened a custody investigation for ${postTitle}`,
+          message: `Automation opened a custody investigation for ${postTitle} after ${staleAcceptedEscalationHours} hours`,
           post_title: postTitle,
           post_id: attempt.post_id,
           item_id: attempt.item_id,

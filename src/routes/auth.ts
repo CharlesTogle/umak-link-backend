@@ -81,7 +81,7 @@ async function writeLoginAudit(
 
   const displayName = getLoginAuditDisplayName(user);
   const details = {
-    message: `${user.user_type} ${displayName} signed in to the UMak-LINK app`,
+    message: `${user.user_type} ${displayName} signed into UMak-LINK app`,
     login_source: loginSource,
     user_type: user.user_type,
     user_name: user.user_name,

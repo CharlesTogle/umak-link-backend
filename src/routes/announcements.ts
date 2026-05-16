@@ -3,6 +3,7 @@ import { getSupabaseClient } from '../services/supabase.js';
 import { sendGlobalAnnouncement } from '../services/notifications.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { SendGlobalAnnouncementRequest, AnnouncementRecord } from '../types/notifications.js';
+import { getUserName, logAudit } from '../utils/audit-logger.js';
 import logger from '../utils/logger.js';
 
 export default async function announcementsRoutes(server: FastifyInstance) {
@@ -32,18 +33,34 @@ export default async function announcementsRoutes(server: FastifyInstance) {
         throw new Error('Unauthorized');
       }
 
-      const success = await sendGlobalAnnouncement(
+      const announcement = await sendGlobalAnnouncement(
         message,
         description || null,
         image_url || null,
         senderId
       );
 
-      if (!success) {
+      if (!announcement) {
         throw new Error('Failed to send announcement');
       }
 
-      logger.info({ senderId }, 'Global announcement sent');
+      const resolvedSenderName = await getUserName(senderId);
+      const senderName = resolvedSenderName === 'Staff' ? 'Admin' : resolvedSenderName;
+
+      await logAudit({
+        userId: senderId,
+        actionType: 'create_announcement',
+        tableName: 'global_announcements_table',
+        recordId: announcement.announcementId.toString(),
+        details: {
+          title: message,
+          message: `${senderName} posted a global announcement: "${message}"`,
+          description: description || null,
+          timestamp: announcement.createdAt,
+        },
+      });
+
+      logger.info({ senderId, announcementId: announcement.announcementId }, 'Global announcement sent');
       return { success: true };
     }
   );

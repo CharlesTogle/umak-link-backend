@@ -267,7 +267,7 @@ test('POST /notifications/send writes recipient name and content into the audit 
     type: 'accept',
     sent_by: 'staff-1',
   });
-  assert.equal(capturedAuditDetails?.message, 'Charles Nathaniel Togle sent notification to user');
+  assert.equal(capturedAuditDetails?.message, 'Charles Nathaniel Togle sent "Post Accepted" to Juan Dela Cruz');
   assert.equal(capturedAuditDetails?.notification_id, 'notification-123');
   assert.equal(capturedAuditDetails?.notification_type, 'accept');
   assert.equal(capturedAuditDetails?.recipient_name, 'Juan Dela Cruz');

@@ -455,7 +455,7 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
             userId: staffId,
             actionType: 'claim_overwritten',
             details: {
-              message: `${staffName} overwritten claim for ${itemName}`,
+              message: `${staffName} overrode the existing claim for ${itemName}`,
               item_id: foundPost.item_id,
               item_name: itemName,
               found_post_id,
@@ -483,7 +483,7 @@ export default async function claimsRoutes(server: FastifyInstance, options: Cla
             userId: staffId,
             actionType: 'claim_processed',
             details: {
-              message: `${staffName} processed claim for ${itemName}`,
+              message: `${staffName} processed ${normalizedClaimDetails.claimer_name}'s claim for ${itemName}`,
               item_id: foundPost.item_id,
               item_name: itemName,
               found_post_id,

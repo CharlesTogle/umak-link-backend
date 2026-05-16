@@ -185,7 +185,7 @@ export default async function notificationsRoutes(
           userId: staffId,
           actionType: 'notification_sent',
           details: {
-            message: `${staffName} sent notification to user`,
+            message: `${staffName} sent "${request.body.title}" to ${recipientName ?? request.body.user_id}`,
             timestamp: new Date().toISOString(),
             notification_id: notificationId.toString(),
             notification_type: request.body.type,

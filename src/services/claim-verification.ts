@@ -233,6 +233,35 @@ function getAuditActorRoleLabel(userType: ClaimVerificationRouteActor['user_type
   }
 }
 
+function getProcessorUserTypeLabel(userType: string | null | undefined): string {
+  switch (userType) {
+    case 'Admin':
+      return 'Admin';
+    case 'Guard':
+      return 'Guard';
+    case 'Staff':
+      return 'Staff';
+    default:
+      return 'User';
+  }
+}
+
+function getVerificationMethodLabel(method: string): string {
+  switch (method) {
+    case 'manual_staff':
+      return 'Manual Staff';
+    case 'staff_qr':
+      return 'Staff QR';
+    case 'guard_qr':
+      return 'Guard QR';
+    default:
+      return method
+        .split('_')
+        .map((segment: string) => segment.charAt(0).toUpperCase() + segment.slice(1))
+        .join(' ');
+  }
+}
+
 async function getAuditActorName(
   supabase: SupabaseClientLike,
   actor: Pick<ClaimVerificationRouteActor, 'user_id' | 'user_type'>
@@ -991,7 +1020,7 @@ export async function createClaimVerificationSession(
     tableName: 'claim_verification_session_table',
     recordId: session.claim_verification_session_id,
     details: {
-      message: `${actorLabel} started claim verification for ${postTitle}`,
+      message: `${actorLabel} started claim verification for ${postTitle} as ${getProcessorUserTypeLabel(input.actor.user_type)}`,
       post_title: postTitle,
       claim_verification_session_id: session.claim_verification_session_id,
       post_id: session.post_id,
@@ -1832,7 +1861,7 @@ export async function completeClaimVerificationSession(
     tableName: 'claim_verification_session_table',
     recordId: session.claim_verification_session_id,
     details: {
-      message: `${actorLabel} completed claim verification for ${postTitle}`,
+      message: `${actorLabel} completed claim verification for ${postTitle} via ${getVerificationMethodLabel(input.verification_method)}`,
       post_title: postTitle,
       claim_verification_session_id: session.claim_verification_session_id,
       claim_qr_session_id: qrSession?.claim_qr_session_id ?? null,

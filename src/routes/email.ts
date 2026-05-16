@@ -10,7 +10,15 @@ interface SendEmailBody {
   from?: string;
 }
 
-export default async function emailRoutes(server: FastifyInstance) {
+interface EmailRouteOptions {
+  services?: {
+    sendEmail?: typeof sendEmail;
+  };
+}
+
+export default async function emailRoutes(server: FastifyInstance, options: EmailRouteOptions = {}) {
+  const dispatchEmail = options.services?.sendEmail ?? sendEmail;
+
   // POST /email/send - Send an email via Resend
   server.post<{ Body: SendEmailBody }>(
     '/send',
@@ -24,7 +32,7 @@ export default async function emailRoutes(server: FastifyInstance) {
         throw new Error('Missing required fields: to, subject, html, senderUuid');
       }
 
-      return sendEmail({ to, subject, html, senderUuid, from });
+      return dispatchEmail({ to, subject, html, senderUuid, from });
     }
   );
 }

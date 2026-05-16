@@ -2,8 +2,6 @@ import { Resend } from 'resend';
 import logger from '../utils/logger.js';
 import { GENERAL_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 export interface SendEmailPayload {
   to: string;
   subject: string;
@@ -11,6 +9,29 @@ export interface SendEmailPayload {
   senderUuid: string;
   from?: string;
 }
+
+interface ResendEmailClient {
+  emails: {
+    send(payload: {
+      from: string;
+      to: string[];
+      subject: string;
+      html: string;
+    }): Promise<{
+      data?: {
+        id?: string | null;
+      } | null;
+      error?: {
+        message?: string | null;
+      } | null;
+    }>;
+  };
+}
+
+type ResendClientFactory = (apiKey: string) => ResendEmailClient;
+
+const defaultResendClientFactory: ResendClientFactory = (apiKey) => new Resend(apiKey);
+let resendClientFactory: ResendClientFactory = defaultResendClientFactory;
 
 export async function sendEmail(payload: SendEmailPayload): Promise<{
   success: boolean;
@@ -30,6 +51,7 @@ export async function sendEmail(payload: SendEmailPayload): Promise<{
   }
 
   try {
+    const resend = resendClientFactory(process.env.RESEND_API_KEY);
     const { data, error } = await withTimeout(
       resend.emails.send({
         from: from || process.env.RESEND_FROM_EMAIL || 'UMak-LINK <noreply@umaklink.com>',
@@ -64,4 +86,8 @@ export async function sendEmail(payload: SendEmailPayload): Promise<{
       to,
     };
   }
+}
+
+export function setResendClientFactoryForTests(factory: ResendClientFactory | null): void {
+  resendClientFactory = factory ?? defaultResendClientFactory;
 }

@@ -8,7 +8,8 @@ import { requireAuth } from '../middleware/auth.js';
 import { AuthLoginRequest, AuthMeResponse, UpdateProfileRequest, UpdateProfileResponse, UserProfile, UserType } from '../types/auth.js';
 import logger from '../utils/logger.js';
 import { getPhilippineNowIso } from '../utils/time.js';
-import { GENERAL_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
+import { AUDIT_TIMEOUT_MS, GENERAL_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
+import { buildApiErrorResponse, createHttpError } from '../utils/http-error.js';
 
 const JWT_SECRET: string = (() => {
   const secret = process.env.JWT_SECRET;
@@ -20,6 +21,7 @@ const JWT_SECRET: string = (() => {
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin', 'Guard'];
+const LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin'];
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 const LOGIN_TIMEOUT_MESSAGE =
@@ -27,6 +29,10 @@ const LOGIN_TIMEOUT_MESSAGE =
 
 function isAllowedUserType(value: unknown): value is UserType {
   return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
+}
+
+function shouldWriteLoginAudit(userType: UserType): boolean {
+  return LOGIN_AUDIT_USER_TYPES.includes(userType);
 }
 
 function isTimeoutError(error: unknown): boolean {
@@ -47,6 +53,58 @@ function normalizeNameToTitleCase(name: string | null | undefined): string | nul
     .split(/\s+/)
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
+}
+
+function sendRouteError(
+  request: FastifyRequest,
+  reply: { status: (code: number) => { send: (payload: unknown) => unknown } },
+  message: string,
+  statusCode: number
+) {
+  return reply
+    .status(statusCode)
+    .send(buildApiErrorResponse(createHttpError(message, statusCode), request.id));
+}
+
+function getLoginAuditDisplayName(user: Pick<UserProfile, 'user_name' | 'email' | 'user_id'>): string {
+  return user.user_name?.trim() || user.email?.trim() || user.user_id;
+}
+
+async function writeLoginAudit(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  user: UserProfile,
+  loginSource: 'umak_link_app'
+): Promise<void> {
+  if (!shouldWriteLoginAudit(user.user_type)) {
+    return;
+  }
+
+  const displayName = getLoginAuditDisplayName(user);
+  const details = {
+    message: `${user.user_type} ${displayName} signed in to the UMak-LINK app`,
+    login_source: loginSource,
+    user_type: user.user_type,
+    user_name: user.user_name,
+    user_email: user.email,
+  };
+
+  const { error } = await withTimeout(
+    Promise.resolve(
+      supabase.rpc('insert_audit_log', {
+        p_user_id: user.user_id,
+        p_action_type: 'account_login',
+        p_target_entity_type: 'user_table',
+        p_target_entity_id: user.user_id,
+        p_details: details,
+      })
+    ),
+    AUDIT_TIMEOUT_MS,
+    'Insert login audit log'
+  );
+
+  if (error) {
+    logger.error({ error, userId: user.user_id, userType: user.user_type }, 'Failed to insert login audit log');
+  }
 }
 
 async function uploadProfilePicture(
@@ -118,7 +176,7 @@ export default async function authRoutes(server: FastifyInstance) {
       const { googleIdToken } = request.body;
 
       if (!oauthClient) {
-        return reply.status(500).send({ error: 'Google OAuth not configured' });
+        return sendRouteError(request, reply, 'Google OAuth not configured', 500);
       }
 
       try {
@@ -134,22 +192,26 @@ export default async function authRoutes(server: FastifyInstance) {
 
         const payload = ticket.getPayload();
         if (!payload || !payload.email || !payload.sub) {
-          return reply.status(400).send({ error: 'Invalid Google token' });
+          return sendRouteError(request, reply, 'Invalid Google token', 400);
         }
 
         if (payload.email_verified !== true) {
-          return reply.status(403).send({
-            error: 'Access Denied',
-            message: 'Only verified organization emails are allowed',
-          });
+          return sendRouteError(
+            request,
+            reply,
+            'Only verified organization emails are allowed',
+            403
+          );
         }
 
         const normalizedEmail = normalizePortalEmail(payload.email);
         if (!isAllowedPortalEmail(normalizedEmail)) {
-          return reply.status(403).send({
-            error: 'Access Denied',
-            message: 'Sign in failed. Please make sure to use your UMAK Google Account and try again',
-          });
+          return sendRouteError(
+            request,
+            reply,
+            'Sign in failed. Please make sure to use your UMAK Google Account and try again',
+            403
+          );
         }
 
         const supabase = getSupabaseClient();
@@ -163,14 +225,14 @@ export default async function authRoutes(server: FastifyInstance) {
         });
 
         if (!syncedUser) {
-          return reply.status(500).send({ error: 'Failed to create user session' });
+          return sendRouteError(request, reply, 'Failed to create user session', 500);
         }
 
         let user = syncedUser;
 
         if (!isAllowedUserType(user.user_type)) {
           logger.error({ userId: user.user_id, userType: user.user_type }, 'Invalid user role in database');
-          return reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
+          return sendRouteError(request, reply, 'Unauthorized role', 403);
         }
 
         // Refresh the stored profile picture on every Google sign-in.
@@ -200,6 +262,15 @@ export default async function authRoutes(server: FastifyInstance) {
 
         logger.info({ userId: user.user_id, email: user.email }, 'User logged in');
 
+        await writeLoginAudit(supabase, {
+          user_id: user.user_id,
+          user_name: user.user_name,
+          email: user.email,
+          profile_picture_url: user.profile_picture_url,
+          user_type: user.user_type,
+          notification_token: user.notification_token,
+        }, 'umak_link_app');
+
         return reply.send({
           token,
           user: {
@@ -214,16 +285,15 @@ export default async function authRoutes(server: FastifyInstance) {
       } catch (error) {
         logger.error({ error }, 'Google auth error');
         if (isTimeoutError(error)) {
-          return reply.status(408).send({
-            error: 'Authentication timed out',
-            message: LOGIN_TIMEOUT_MESSAGE,
-          });
+          return sendRouteError(request, reply, LOGIN_TIMEOUT_MESSAGE, 408);
         }
 
-        return reply.status(401).send({
-          error: 'Authentication failed',
-          message: 'Unable to complete sign in. Please try again.',
-        });
+        return sendRouteError(
+          request,
+          reply,
+          'Unable to complete sign in. Please try again.',
+          401
+        );
       }
     }
   );
@@ -257,7 +327,7 @@ export default async function authRoutes(server: FastifyInstance) {
     },
     async (request: FastifyRequest, reply): Promise<AuthMeResponse> => {
       if (!request.user) {
-        reply.status(401).send({ error: 'Unauthorized' });
+        sendRouteError(request, reply, 'Unauthorized', 401);
         return {} as AuthMeResponse;
       }
 
@@ -271,13 +341,13 @@ export default async function authRoutes(server: FastifyInstance) {
 
       if (error || !user) {
         logger.error({ error, userId: request.user.user_id }, 'Failed to fetch user');
-        reply.status(404).send({ error: 'User not found' });
+        sendRouteError(request, reply, 'User not found', 404);
         return {} as AuthMeResponse;
       }
 
       if (!isAllowedUserType(user.user_type)) {
         logger.warn({ userId: user.user_id, userType: user.user_type }, 'Blocked user with invalid role');
-        reply.status(403).send({ error: 'Access Denied', message: 'Unauthorized role' });
+        sendRouteError(request, reply, 'Unauthorized role', 403);
         return {} as AuthMeResponse;
       }
 
@@ -332,7 +402,7 @@ export default async function authRoutes(server: FastifyInstance) {
     },
     async (request: FastifyRequest<{ Body: UpdateProfileRequest }>, reply): Promise<UpdateProfileResponse> => {
       if (!request.user) {
-        reply.status(401).send({ error: 'Unauthorized' });
+        sendRouteError(request, reply, 'Unauthorized', 401);
         return {} as UpdateProfileResponse;
       }
 
@@ -341,7 +411,7 @@ export default async function authRoutes(server: FastifyInstance) {
 
       // Validate at least one field is being updated
       if (Object.keys(updates).length === 0) {
-        reply.status(400).send({ error: 'No update fields provided' });
+        sendRouteError(request, reply, 'No update fields provided', 400);
         return {} as UpdateProfileResponse;
       }
 
@@ -356,7 +426,7 @@ export default async function authRoutes(server: FastifyInstance) {
 
       if (error || !updatedUser) {
         logger.error({ error, userId }, 'Failed to update user profile');
-        reply.status(500).send({ error: 'Failed to update profile' });
+        sendRouteError(request, reply, 'Failed to update profile', 500);
         return {} as UpdateProfileResponse;
       }
 
@@ -396,12 +466,12 @@ export default async function authRoutes(server: FastifyInstance) {
     },
     async (request, reply) => {
       if (!request.user) {
-        reply.status(401).send({ error: 'Unauthorized' });
+        sendRouteError(request, reply, 'Unauthorized', 401);
         return;
       }
 
       if (!oauthClient) {
-        reply.status(500).send({ error: 'Google OAuth not configured' });
+        sendRouteError(request, reply, 'Google OAuth not configured', 500);
         return;
       }
 
@@ -420,13 +490,13 @@ export default async function authRoutes(server: FastifyInstance) {
 
         const payload = ticket.getPayload();
         if (!payload || !payload.email || !payload.picture) {
-          reply.status(400).send({ error: 'Invalid Google token or no picture available' });
+          sendRouteError(request, reply, 'Invalid Google token or no picture available', 400);
           return;
         }
 
         // Verify the token belongs to the current user
         if (!request.user.email || payload.email.trim().toLowerCase() !== request.user.email.toLowerCase()) {
-          reply.status(403).send({ error: 'Token does not match current user' });
+          sendRouteError(request, reply, 'Token does not match current user', 403);
           return;
         }
 
@@ -436,7 +506,7 @@ export default async function authRoutes(server: FastifyInstance) {
         const uploadedUrl = await uploadProfilePicture(supabase, request.user.user_id, payload.picture);
 
         if (!uploadedUrl) {
-          reply.status(500).send({ error: 'Failed to upload profile picture' });
+          sendRouteError(request, reply, 'Failed to upload profile picture', 500);
           return;
         }
 
@@ -450,7 +520,7 @@ export default async function authRoutes(server: FastifyInstance) {
 
         if (error || !updatedUser) {
           logger.error({ error, userId: request.user.user_id }, 'Failed to update profile picture');
-          reply.status(500).send({ error: 'Failed to update profile' });
+          sendRouteError(request, reply, 'Failed to update profile', 500);
           return;
         }
 
@@ -470,7 +540,7 @@ export default async function authRoutes(server: FastifyInstance) {
         };
       } catch (error) {
         logger.error({ error }, 'Failed to update profile picture from Google');
-        reply.status(500).send({ error: 'Failed to update profile picture' });
+        sendRouteError(request, reply, 'Failed to update profile picture', 500);
         return;
       }
     }

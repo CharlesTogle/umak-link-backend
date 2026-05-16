@@ -4,6 +4,7 @@ import { requireStaff } from '../middleware/auth.js';
 import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
 import { getPhilippineNowIso } from '../utils/time.js';
+import { normalizeUpstreamError } from '../utils/http-error.js';
 
 interface PendingMatchCreateRequest {
   post_id: number;
@@ -54,7 +55,11 @@ export default async function pendingMatchesRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error }, 'Failed to create pending match');
-        throw new Error(error.message || 'Failed to create pending match');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to create pending match',
+          code: 'PENDING_MATCH_CREATE_FAILED',
+        });
       }
 
       logger.info({ pendingMatchId: data.id }, 'Pending match created');
@@ -149,7 +154,11 @@ export default async function pendingMatchesRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error, matchId }, 'Failed to update pending match status');
-        throw new Error(error.message || 'Failed to update status');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to update pending match status',
+          code: 'PENDING_MATCH_STATUS_UPDATE_FAILED',
+        });
       }
 
       logger.info({ matchId, status }, 'Pending match status updated');

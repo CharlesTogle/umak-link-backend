@@ -215,11 +215,12 @@ test('GET /users/search maps RPC authorization errors to 403', { concurrency: fa
   });
 
   assert.equal(res.statusCode, 403);
-  assert.deepEqual(JSON.parse(res.body), {
-    error: 'Error',
-    message: 'Unauthorized: Only Staff can use this',
-    statusCode: 403,
-  });
+  const body = JSON.parse(res.body);
+  assert.equal(body.statusCode, 403);
+  assert.equal(body.error, 'Forbidden');
+  assert.equal(body.code, 'FORBIDDEN');
+  assert.equal(body.message, 'Forbidden');
+  assert.equal(typeof body.requestId, 'string');
 
   await app.close();
 });
@@ -470,11 +471,12 @@ test('GET /users/claim-code/:code rejects an expired claim code', { concurrency:
   });
 
   assert.equal(res.statusCode, 410);
-  assert.deepEqual(JSON.parse(res.body), {
-    error: 'Error',
-    message: 'Claim QR expired. Ask the student to open the claim QR again.',
-    statusCode: 410,
-  });
+  const body = JSON.parse(res.body);
+  assert.equal(body.statusCode, 410);
+  assert.equal(body.error, 'Gone');
+  assert.equal(body.code, 'GONE');
+  assert.equal(body.message, 'Gone');
+  assert.equal(typeof body.requestId, 'string');
 
   await app.close();
 });
@@ -517,11 +519,12 @@ test('GET /users/claim-code/:code rejects a guard when the found post is not the
   });
 
   assert.equal(res.statusCode, 403);
-  assert.deepEqual(JSON.parse(res.body), {
-    error: 'Error',
-    message: 'Guard can only resolve claim codes for items still in their custody review.',
-    statusCode: 403,
-  });
+  const body = JSON.parse(res.body);
+  assert.equal(body.statusCode, 403);
+  assert.equal(body.error, 'Forbidden');
+  assert.equal(body.code, 'FORBIDDEN');
+  assert.equal(body.message, 'Forbidden');
+  assert.equal(typeof body.requestId, 'string');
 
   await app.close();
 });

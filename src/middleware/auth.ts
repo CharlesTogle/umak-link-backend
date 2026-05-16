@@ -5,6 +5,7 @@ import { isAllowedPortalEmail, normalizePortalEmail, syncPortalUserOnSignIn } fr
 import { JwtPayload, UserType } from '../types/auth.js';
 import { isProfilePictureStorageUrl } from '../services/storage.js';
 import logger from '../utils/logger.js';
+import { buildApiErrorResponse, createHttpError } from '../utils/http-error.js';
 import { extractBearerToken, getAuthorizationHeader } from '../utils/http-headers.js';
 import { getPhilippineNowIso } from '../utils/time.js';
 
@@ -48,6 +49,17 @@ function getUserMetadataValue(
 ): string | null {
   const value = metadata?.[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function sendAuthError(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  message: string,
+  statusCode: number
+): void {
+  reply.status(statusCode).send(
+    buildApiErrorResponse(createHttpError(message, statusCode), request.id)
+  );
 }
 
 export async function maybeSyncProfilePictureFromSupabaseMetadata(
@@ -179,7 +191,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
       },
       'Missing or malformed authorization header'
     );
-    reply.status(401).send({ error: 'Unauthorized', message: 'No token provided' });
+    sendAuthError(request, reply, 'No token provided', 401);
     return;
   }
 
@@ -189,7 +201,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
     });
 
     if (!isJwtPayloadShape(decoded)) {
-      reply.status(401).send({ error: 'Unauthorized', message: 'Invalid token payload' });
+      sendAuthError(request, reply, 'Invalid token payload', 401);
       return;
     }
 
@@ -207,7 +219,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
 
   const supabaseUser = await resolvePortalUserFromSupabaseToken(token);
   if (!supabaseUser) {
-    reply.status(401).send({ error: 'Unauthorized', message: 'Invalid token' });
+    sendAuthError(request, reply, 'Invalid token', 401);
     return;
   }
 
@@ -220,12 +232,12 @@ export async function requireStaff(request: FastifyRequest, reply: FastifyReply)
   if (reply.sent) return;
   const isSynced = await syncAuthoritativeUser(request);
   if (!isSynced) {
-    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    sendAuthError(request, reply, 'Session validation failed', 401);
     return;
   }
 
   if (!request.user || !['Staff', 'Admin'].includes(request.user.user_type)) {
-    reply.status(403).send({ error: 'Forbidden', message: 'Staff access required' });
+    sendAuthError(request, reply, 'Staff access required', 403);
   }
 }
 
@@ -235,12 +247,12 @@ export async function requireStaffOnly(request: FastifyRequest, reply: FastifyRe
   if (reply.sent) return;
   const isSynced = await syncAuthoritativeUser(request);
   if (!isSynced) {
-    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    sendAuthError(request, reply, 'Session validation failed', 401);
     return;
   }
 
   if (!request.user || request.user.user_type !== 'Staff') {
-    reply.status(403).send({ error: 'Forbidden', message: 'Staff access required' });
+    sendAuthError(request, reply, 'Staff access required', 403);
   }
 }
 
@@ -250,12 +262,12 @@ export async function requireAdmin(request: FastifyRequest, reply: FastifyReply)
   if (reply.sent) return;
   const isSynced = await syncAuthoritativeUser(request);
   if (!isSynced) {
-    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    sendAuthError(request, reply, 'Session validation failed', 401);
     return;
   }
 
   if (!request.user || request.user.user_type !== 'Admin') {
-    reply.status(403).send({ error: 'Forbidden', message: 'Admin access required' });
+    sendAuthError(request, reply, 'Admin access required', 403);
   }
 }
 
@@ -265,12 +277,12 @@ export async function requireGuard(request: FastifyRequest, reply: FastifyReply)
   if (reply.sent) return;
   const isSynced = await syncAuthoritativeUser(request);
   if (!isSynced) {
-    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    sendAuthError(request, reply, 'Session validation failed', 401);
     return;
   }
 
   if (!request.user || request.user.user_type !== 'Guard') {
-    reply.status(403).send({ error: 'Forbidden', message: 'Guard access required' });
+    sendAuthError(request, reply, 'Guard access required', 403);
   }
 }
 
@@ -283,12 +295,12 @@ export async function requireGuardOrStaffOrAdmin(
   if (reply.sent) return;
   const isSynced = await syncAuthoritativeUser(request);
   if (!isSynced) {
-    reply.status(401).send({ error: 'Unauthorized', message: 'Session validation failed' });
+    sendAuthError(request, reply, 'Session validation failed', 401);
     return;
   }
 
   if (!request.user || !isGuardOrStaffOrAdmin(request.user.user_type)) {
-    reply.status(403).send({ error: 'Forbidden', message: 'Guard, staff, or admin access required' });
+    sendAuthError(request, reply, 'Guard, staff, or admin access required', 403);
   }
 }
 

@@ -3,12 +3,7 @@ import { getSupabaseClient } from '../../services/supabase.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { EditPostRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
-
-function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
-  const error = new Error(message) as Error & { statusCode: number };
-  error.statusCode = statusCode;
-  return error;
-}
+import { createHttpError, normalizeUpstreamError } from '../../utils/http-error.js';
 
 function buildPlaceholderImageHash(params: { posterId: string; itemType: string; itemName: string }) {
   return `no-image:${params.posterId}:${params.itemType}:${params.itemName.trim().toLowerCase()}`;
@@ -107,7 +102,7 @@ export default async function postsImageRoutes(server: FastifyInstance) {
 
       if (itemError || !itemRecord) {
         logger.error({ error: itemError, postId }, 'Failed to fetch item for edit');
-        throw new Error('Item not found');
+        throw createHttpError('Item not found', 404);
       }
 
       const { data: oldImageData } = await supabase
@@ -145,7 +140,11 @@ export default async function postsImageRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error, postId }, 'Failed to edit post with image');
-        throw new Error(error.message || 'Failed to edit post');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to edit post',
+          code: 'POST_EDIT_FAILED',
+        });
       }
 
       // Delete old image from storage if we have a new one

@@ -3,7 +3,7 @@ import { getSupabaseClient } from '../services/supabase.js';
 import { requireAuth, requireGuardOrStaffOrAdmin, requireStaff } from '../middleware/auth.js';
 import { canGuardAccessClaimReview } from '../services/claim-verification.js';
 import { UserSearchResponse } from '../types/auth.js';
-import { createHttpError } from '../utils/http-error.js';
+import { createHttpError, normalizeUpstreamError } from '../utils/http-error.js';
 import { generateClaimCode, normalizeClaimCodeInput } from '../utils/claim-code.js';
 import logger from '../utils/logger.js';
 
@@ -319,10 +319,19 @@ export default async function usersRoutes(server: FastifyInstance, options: User
       if (error) {
         logger.error({ error }, 'User search failed');
         if (isUserSearchAuthorizationError(error)) {
-          throw createHttpError(error.message || 'Forbidden', 403);
+          throw normalizeUpstreamError(error, {
+            statusCode: 403,
+            message: 'Forbidden',
+            code: 'FORBIDDEN',
+            error: 'Forbidden',
+          });
         }
 
-        throw new Error(error.message || 'Search failed');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Search failed',
+          code: 'USER_SEARCH_FAILED',
+        });
       }
 
       return { results: data || [] };

@@ -4,14 +4,9 @@ import { requireAuth } from '../../middleware/auth.js';
 import { CreatePostRequest, EditPostRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
 import { logAudit, getUserName } from '../../utils/audit-logger.js';
+import { createHttpError, normalizeUpstreamError } from '../../utils/http-error.js';
 
 type SupabaseClientLike = ReturnType<typeof getSupabaseClient>;
-
-function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
-  const error = new Error(message) as Error & { statusCode: number };
-  error.statusCode = statusCode;
-  return error;
-}
 
 function buildPlaceholderImageHash(params: { posterId: string; itemType: string; itemName: string }) {
   return `no-image:${params.posterId}:${params.itemType}:${params.itemName.trim().toLowerCase()}`;
@@ -260,7 +255,11 @@ export default async function postsWriteRoutes(
 
       if (error) {
         logger.error({ error }, 'Failed to create post');
-        throw new Error(error.message || 'Failed to create post');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to create post',
+          code: 'POST_CREATE_FAILED',
+        });
       }
 
       const postId = resolveCreatedPostId(data);
@@ -352,7 +351,11 @@ export default async function postsWriteRoutes(
 
       if (error) {
         logger.error({ error, postId }, 'Failed to edit post');
-        throw new Error(error.message || 'Failed to edit post');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to edit post',
+          code: 'POST_EDIT_FAILED',
+        });
       }
 
       logger.info({ postId }, 'Post edited');
@@ -400,7 +403,11 @@ export default async function postsWriteRoutes(
 
       if (error) {
         logger.error({ error, postId }, 'Failed to delete post');
-        throw new Error(error.message || 'Failed to delete post');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to delete post',
+          code: 'POST_DELETE_FAILED',
+        });
       }
 
       // Log to audit trail if deleted by staff

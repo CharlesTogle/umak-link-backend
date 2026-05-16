@@ -4,7 +4,7 @@ import { requireStaff } from '../../middleware/auth.js';
 import { UpdatePostStatusRequest, UpdateItemStatusRequest } from '../../types/posts.js';
 import logger from '../../utils/logger.js';
 import { logAudit, getUserName } from '../../utils/audit-logger.js';
-import { createHttpError } from '../../utils/http-error.js';
+import { createHttpError, normalizeUpstreamError } from '../../utils/http-error.js';
 
 type SupabaseClientLike = ReturnType<typeof getSupabaseClient>;
 
@@ -54,7 +54,11 @@ async function recomputeFoundItemCustodyStatus(
 
   if (error) {
     logger.error({ error, postId, itemId }, 'Failed to recompute item custody status');
-    throw new Error(error.message || 'Failed to update item custody status');
+    throw normalizeUpstreamError(error, {
+      statusCode: 500,
+      message: 'Failed to update item custody status',
+      code: 'ITEM_CUSTODY_STATUS_UPDATE_FAILED',
+    });
   }
 
   return typeof data === 'string' ? data : null;
@@ -117,7 +121,11 @@ export default async function postsStatusRoutes(
 
       if (error) {
         logger.error({ error, postId }, 'Failed to update post status');
-        throw new Error(error.message || 'Failed to update post status');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to update post status',
+          code: 'POST_STATUS_UPDATE_FAILED',
+        });
       }
 
       // Log to audit trail
@@ -197,7 +205,11 @@ export default async function postsStatusRoutes(
 
       if (error) {
         logger.error({ error, postId }, 'Failed to update staff assignment');
-        throw new Error(error.message || 'Failed to update staff assignment');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to update staff assignment',
+          code: 'POST_STAFF_ASSIGNMENT_FAILED',
+        });
       }
 
       logger.info({ postId, staff_id }, 'Post staff assignment updated');
@@ -284,7 +296,11 @@ export default async function postsStatusRoutes(
 
         if (error) {
           logger.error({ error, itemId }, 'Failed to discard found item');
-          throw new Error(error.message || 'Failed to update item status');
+          throw normalizeUpstreamError(error, {
+            statusCode: 500,
+            message: 'Failed to update item status',
+            code: 'ITEM_STATUS_UPDATE_FAILED',
+          });
         }
 
         discardedRecord = (Array.isArray(data) ? data[0] : data) as DiscardFoundItemRow | null;
@@ -297,7 +313,11 @@ export default async function postsStatusRoutes(
 
         if (error) {
           logger.error({ error, itemId }, 'Failed to update item status');
-          throw new Error(error.message || 'Failed to update item status');
+          throw normalizeUpstreamError(error, {
+            statusCode: 500,
+            message: 'Failed to update item status',
+            code: 'ITEM_STATUS_UPDATE_FAILED',
+          });
         }
 
         if (

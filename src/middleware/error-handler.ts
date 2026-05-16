@@ -1,5 +1,6 @@
 import { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import logger from '../utils/logger.js';
+import { buildApiErrorResponse } from '../utils/http-error.js';
 
 export async function errorHandler(
   error: FastifyError,
@@ -16,9 +17,11 @@ export async function errorHandler(
     url: request.url,
   }, 'Request error');
 
-  reply.status(statusCode).send({
-    error: error.name || 'InternalServerError',
-    message: error.message || 'An unexpected error occurred',
-    statusCode,
-  });
+  const errorResponse = buildApiErrorResponse(error, request.id);
+
+  if (typeof errorResponse.retryAfterSeconds === 'number') {
+    reply.header('Retry-After', String(errorResponse.retryAfterSeconds));
+  }
+
+  reply.status(statusCode).send(errorResponse);
 }

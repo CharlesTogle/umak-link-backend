@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { requireAuth } from '../middleware/auth.js';
 import { getGeminiService, RateLimitError } from '../services/gemini.js';
 import logger from '../utils/logger.js';
+import { buildApiErrorResponse, createHttpError } from '../utils/http-error.js';
 
 interface AutofillBody {
   image_data_url: string;
@@ -70,20 +71,32 @@ export default async function aiRoutes(server: FastifyInstance) {
       } catch (error) {
         if (error instanceof RateLimitError) {
           logger.warn('create-post-autofill rate limited');
-          return reply.status(429).send({
-            success: false,
-            error: 'rate_limit_exceeded',
-            message: 'Autogeneration is limited. Try again later.',
-          });
+          const rateLimitedError = createHttpError(
+            'Autogeneration is limited. Try again later.',
+            429,
+            {
+              code: 'RATE_LIMITED',
+              error: 'Rate Limited',
+              retryAfterSeconds: 5,
+            }
+          );
+          reply.header('Retry-After', '5');
+          return reply.status(429).send(
+            buildApiErrorResponse(rateLimitedError, request.id)
+          );
         }
 
         if (error instanceof Error && error.message === 'Gemini service not configured') {
           logger.warn('create-post-autofill called but Gemini not configured');
-          return reply.status(503).send({
-            success: false,
-            error: 'ai_unavailable',
-            message: 'Gemini service is not configured.',
-          });
+          return reply.status(503).send(
+            buildApiErrorResponse(
+              createHttpError('Gemini service is not configured.', 503, {
+                code: 'SERVICE_UNAVAILABLE',
+                error: 'Service Unavailable',
+              }),
+              request.id
+            )
+          );
         }
 
         const errObj = error as Record<string, unknown>;
@@ -96,11 +109,15 @@ export default async function aiRoutes(server: FastifyInstance) {
           },
           'Failed to generate create-post autofill'
         );
-        return reply.status(500).send({
-          success: false,
-          error: 'ai_generation_failed',
-          message: 'Failed to generate autofill content.',
-        });
+        return reply.status(500).send(
+          buildApiErrorResponse(
+            createHttpError('Failed to generate autofill content.', 500, {
+              code: 'AI_GENERATION_FAILED',
+              error: 'Internal Server Error',
+            }),
+            request.id
+          )
+        );
       }
     }
   );

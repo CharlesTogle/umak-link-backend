@@ -1,7 +1,10 @@
 export interface ApiError {
+  statusCode: number;
   error: string;
+  code: string;
   message?: string;
-  statusCode?: number;
+  requestId?: string;
+  retryAfterSeconds?: number;
 }
 
 export interface PaginationParams {

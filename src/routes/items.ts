@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getSupabaseClient } from '../services/supabase.js';
 import { requireStaff } from '../middleware/auth.js';
 import logger from '../utils/logger.js';
+import { createHttpError, normalizeUpstreamError } from '../utils/http-error.js';
 
 export default async function itemsRoutes(server: FastifyInstance) {
   // GET /items/:id - Get item details (staff only)
@@ -31,7 +32,7 @@ export default async function itemsRoutes(server: FastifyInstance) {
 
       if (error || !item) {
         logger.error({ error, itemId }, 'Failed to fetch item');
-        throw new Error('Item not found');
+        throw createHttpError('Item not found', 404);
       }
 
       return item;
@@ -76,7 +77,11 @@ export default async function itemsRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error, itemId }, 'Failed to update item metadata');
-        throw new Error(error.message || 'Failed to update item metadata');
+        throw normalizeUpstreamError(error, {
+          statusCode: 500,
+          message: 'Failed to update item metadata',
+          code: 'ITEM_METADATA_UPDATE_FAILED',
+        });
       }
 
       logger.info({ itemId }, 'Item metadata updated');

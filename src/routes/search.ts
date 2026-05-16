@@ -5,6 +5,7 @@ import { requireAuth, requireStaff } from '../middleware/auth.js';
 import { SearchItemsRequest, SearchItemsStaffRequest } from '../types/search.js';
 import logger from '../utils/logger.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
+import { buildApiErrorResponse, createHttpError } from '../utils/http-error.js';
 
 interface MatchMissingItemRequest {
   post_id: string;
@@ -37,16 +38,17 @@ function isAbortLikeError(error: unknown): boolean {
 
 function throwSearchError(error: unknown, fallbackMessage: string): never {
   if (isAbortLikeError(error)) {
-    const timeoutError = new Error(
-      'Search request timed out. Please try again or narrow your filters.'
-    ) as Error & { statusCode?: number };
-    timeoutError.statusCode = 504;
-    throw timeoutError;
+    throw createHttpError(
+      'Search request timed out. Please try again or narrow your filters.',
+      504,
+      { code: 'REQUEST_TIMEOUT', error: 'Gateway Timeout' }
+    );
   }
 
-  const internalError = new Error(fallbackMessage) as Error & { statusCode?: number };
-  internalError.statusCode = 500;
-  throw internalError;
+  throw createHttpError(fallbackMessage, 500, {
+    code: 'SEARCH_FAILED',
+    error: 'Internal Server Error',
+  });
 }
 
 function parseImageDataUrl(dataUrl: string): { mimeType: string; base64: string } {
@@ -96,27 +98,43 @@ export default async function searchRoutes(server: FastifyInstance) {
         };
       } catch (error) {
         if (error instanceof RateLimitError) {
-          return reply.status(429).send({
-            success: false,
-            error: 'rate_limit_exceeded',
-            message: 'Image search is limited right now. Try again later.',
-          });
+          const rateLimitedError = createHttpError(
+            'Image search is limited right now. Try again later.',
+            429,
+            {
+              code: 'RATE_LIMITED',
+              error: 'Rate Limited',
+              retryAfterSeconds: 5,
+            }
+          );
+          reply.header('Retry-After', '5');
+          return reply.status(429).send(
+            buildApiErrorResponse(rateLimitedError, request.id)
+          );
         }
 
         if (error instanceof Error && error.message === 'Gemini service not configured') {
-          return reply.status(503).send({
-            success: false,
-            error: 'ai_unavailable',
-            message: 'Image search is unavailable right now.',
-          });
+          return reply.status(503).send(
+            buildApiErrorResponse(
+              createHttpError('Image search is unavailable right now.', 503, {
+                code: 'SERVICE_UNAVAILABLE',
+                error: 'Service Unavailable',
+              }),
+              request.id
+            )
+          );
         }
 
         logger.error({ error }, 'Failed to generate reverse image search query');
-        return reply.status(500).send({
-          success: false,
-          error: 'image_query_failed',
-          message: 'Failed to analyze image for search.',
-        });
+        return reply.status(500).send(
+          buildApiErrorResponse(
+            createHttpError('Failed to analyze image for search.', 500, {
+              code: 'IMAGE_QUERY_FAILED',
+              error: 'Internal Server Error',
+            }),
+            request.id
+          )
+        );
       }
     }
   );
@@ -194,7 +212,7 @@ export default async function searchRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error }, 'Search failed');
-        throwSearchError(error, error.message || 'Search failed');
+        throwSearchError(error, 'Search failed');
       }
 
       return { results: data || [] };
@@ -274,7 +292,7 @@ export default async function searchRoutes(server: FastifyInstance) {
 
       if (error) {
         logger.error({ error }, 'Staff search failed');
-        throwSearchError(error, error.message || 'Search failed');
+        throwSearchError(error, 'Search failed');
       }
 
       return { results: data || [] };

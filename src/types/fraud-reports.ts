@@ -25,6 +25,7 @@ export interface FraudReportPublic {
   poster: UserProfile;
   claim_info: Record<string, unknown> | null;
   item_info: Record<string, unknown>;
+  claim_processed_by_user_type?: 'User' | 'Staff' | 'Admin' | 'Guard' | null;
 }
 
 export interface FraudReportListResponse {

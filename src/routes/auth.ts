@@ -21,7 +21,21 @@ const JWT_SECRET: string = (() => {
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin', 'Guard'];
-const LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin'];
+const APP_LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin'];
+const PORTAL_LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin', 'Guard'];
+type LoginAuditSource = 'umak_link_app' | 'admin_staff_portal';
+
+export interface AuthRouteServices {
+  getSupabaseClient: typeof getSupabaseClient;
+}
+
+interface AuthRouteOptions {
+  services?: Partial<AuthRouteServices>;
+}
+
+const defaultServices: AuthRouteServices = {
+  getSupabaseClient,
+};
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 const LOGIN_TIMEOUT_MESSAGE =
@@ -31,8 +45,12 @@ function isAllowedUserType(value: unknown): value is UserType {
   return typeof value === 'string' && ALLOWED_USER_TYPES.includes(value as UserType);
 }
 
-function shouldWriteLoginAudit(userType: UserType): boolean {
-  return LOGIN_AUDIT_USER_TYPES.includes(userType);
+function shouldWriteLoginAudit(userType: UserType, loginSource: LoginAuditSource): boolean {
+  if (loginSource === 'umak_link_app') {
+    return APP_LOGIN_AUDIT_USER_TYPES.includes(userType);
+  }
+
+  return PORTAL_LOGIN_AUDIT_USER_TYPES.includes(userType);
 }
 
 function isTimeoutError(error: unknown): boolean {
@@ -70,40 +88,65 @@ function getLoginAuditDisplayName(user: Pick<UserProfile, 'user_name' | 'email' 
   return user.user_name?.trim() || user.email?.trim() || user.user_id;
 }
 
+function getPortalLoginDestination(userType: UserType): string {
+  if (userType === 'Admin') return 'admin portal';
+  if (userType === 'Guard') return 'guard portal';
+  return 'staff portal';
+}
+
 async function writeLoginAudit(
   supabase: ReturnType<typeof getSupabaseClient>,
   user: UserProfile,
-  loginSource: 'umak_link_app'
+  loginSource: LoginAuditSource
 ): Promise<void> {
-  if (!shouldWriteLoginAudit(user.user_type)) {
+  if (!shouldWriteLoginAudit(user.user_type, loginSource)) {
     return;
   }
 
   const displayName = getLoginAuditDisplayName(user);
-  const details = {
-    message: `${user.user_type} ${displayName} signed into UMak-LINK app`,
-    login_source: loginSource,
-    user_type: user.user_type,
-    user_name: user.user_name,
-    user_email: user.email,
-  };
+  const details =
+    loginSource === 'umak_link_app'
+      ? {
+        message: `${user.user_type} ${displayName} signed into UMak-LINK app`,
+        login_source: loginSource,
+        user_type: user.user_type,
+        user_name: user.user_name,
+        user_email: user.email,
+      }
+      : {
+        message: `${user.user_type} ${displayName} signed into ${getPortalLoginDestination(user.user_type)}`,
+        login_source: loginSource,
+        user_type: user.user_type,
+        user_name: user.user_name,
+        user_email: user.email,
+      };
 
-  const { error } = await withTimeout(
-    Promise.resolve(
-      supabase.rpc('insert_audit_log', {
-        p_user_id: user.user_id,
-        p_action_type: 'account_login',
-        p_target_entity_type: 'user_table',
-        p_target_entity_id: user.user_id,
-        p_details: details,
-      })
-    ),
-    AUDIT_TIMEOUT_MS,
-    'Insert login audit log'
-  );
+  try {
+    const { error } = await withTimeout(
+      Promise.resolve(
+        supabase.rpc('insert_audit_log', {
+          p_user_id: user.user_id,
+          p_action_type: 'account_login',
+          p_target_entity_type: 'user_table',
+          p_target_entity_id: user.user_id,
+          p_details: details,
+        })
+      ),
+      AUDIT_TIMEOUT_MS,
+      'Insert login audit log'
+    );
 
-  if (error) {
-    logger.error({ error, userId: user.user_id, userType: user.user_type }, 'Failed to insert login audit log');
+    if (error) {
+      logger.error(
+        { error, userId: user.user_id, userType: user.user_type, loginSource },
+        'Failed to insert login audit log'
+      );
+    }
+  } catch (error) {
+    logger.error(
+      { error, userId: user.user_id, userType: user.user_type, loginSource },
+      'Failed to insert login audit log'
+    );
   }
 }
 
@@ -156,7 +199,15 @@ async function uploadProfilePicture(
   }
 }
 
-export default async function authRoutes(server: FastifyInstance) {
+export default async function authRoutes(
+  server: FastifyInstance,
+  options: AuthRouteOptions = {}
+) {
+  const services = {
+    ...defaultServices,
+    ...options.services,
+  };
+
   // POST /auth/google - Login with Google ID token
   server.post<{ Body: AuthLoginRequest }>(
     '/google',
@@ -214,7 +265,7 @@ export default async function authRoutes(server: FastifyInstance) {
           );
         }
 
-        const supabase = getSupabaseClient();
+        const supabase = services.getSupabaseClient();
         const loginTimestamp = getPhilippineNowIso();
         const normalizedName = normalizeNameToTitleCase(payload.name);
 
@@ -331,7 +382,7 @@ export default async function authRoutes(server: FastifyInstance) {
         return {} as AuthMeResponse;
       }
 
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
 
       const { data: user, error } = await supabase
         .from('user_table')
@@ -361,6 +412,72 @@ export default async function authRoutes(server: FastifyInstance) {
           notification_token: user.notification_token,
         } as UserProfile,
       };
+    }
+  );
+
+  server.post(
+    '/portal-login-audit',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        response: {
+          202: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+            },
+            required: ['success'],
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply): Promise<{ success: boolean }> => {
+      if (!request.user) {
+        sendRouteError(request, reply, 'Unauthorized', 401);
+        return {} as { success: boolean };
+      }
+
+      const supabase = services.getSupabaseClient();
+      const { data: user, error } = await supabase
+        .from('user_table')
+        .select('*')
+        .eq('user_id', request.user.user_id)
+        .single();
+
+      if (error || !user) {
+        logger.error({ error, userId: request.user.user_id }, 'Failed to fetch user for portal login audit');
+        sendRouteError(request, reply, 'User not found', 404);
+        return {} as { success: boolean };
+      }
+
+      if (!isAllowedUserType(user.user_type)) {
+        logger.warn(
+          { userId: user.user_id, userType: user.user_type },
+          'Blocked portal login audit for invalid role'
+        );
+        sendRouteError(request, reply, 'Unauthorized role', 403);
+        return {} as { success: boolean };
+      }
+
+      if (!PORTAL_LOGIN_AUDIT_USER_TYPES.includes(user.user_type)) {
+        sendRouteError(request, reply, 'Portal access required', 403);
+        return {} as { success: boolean };
+      }
+
+      void writeLoginAudit(
+        supabase,
+        {
+          user_id: user.user_id,
+          user_name: user.user_name,
+          email: user.email,
+          profile_picture_url: user.profile_picture_url,
+          user_type: user.user_type,
+          notification_token: user.notification_token,
+        },
+        'admin_staff_portal'
+      );
+
+      return reply.code(202).send({ success: true });
     }
   );
 
@@ -415,7 +532,7 @@ export default async function authRoutes(server: FastifyInstance) {
         return {} as UpdateProfileResponse;
       }
 
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
 
       const { data: updatedUser, error } = await supabase
         .from('user_table')
@@ -500,7 +617,7 @@ export default async function authRoutes(server: FastifyInstance) {
           return;
         }
 
-        const supabase = getSupabaseClient();
+        const supabase = services.getSupabaseClient();
 
         // Upload profile picture
         const uploadedUrl = await uploadProfilePicture(supabase, request.user.user_id, payload.picture);

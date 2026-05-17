@@ -141,12 +141,11 @@ test(
 );
 
 test(
-  'POST /claims/process persists linked missing item and claimed_at using the claim_table row',
+  'POST /claims/process returns the RPC claim_id and forwards linked missing item plus claimed_at',
   { concurrency: false },
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
-    const custodyUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
 
     const fakeSupabase = {
       from(table: string) {
@@ -228,7 +227,7 @@ test(
           return {
             select(columns: string) {
               return {
-                eq(column: string, value: string) {
+                eq(column: string, _value: string) {
                   assert.equal(column, 'item_id');
 
                   return {
@@ -242,13 +241,7 @@ test(
                           error: { code: 'PGRST116' },
                         };
                       }
-
-                      assert.equal(columns, 'claim_id');
-                      assert.equal(value, 'found-item-42');
-                      return {
-                        data: { claim_id: 'claim-123' },
-                        error: null,
-                      };
+                      throw new Error(`Unexpected claim_table select columns: ${columns}`);
                     },
                   };
                 },
@@ -284,34 +277,12 @@ test(
           };
         }
 
-        if (table === 'custody_record_table') {
-          return {
-            insert() {
-              return Promise.resolve({ error: null });
-            },
-          };
-        }
-
-        if (table === 'item_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  custodyUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
         throw new Error(`Unexpected table: ${table}`);
       },
       async rpc(functionName: string, args: Record<string, unknown>) {
         rpcCalls.push({ functionName, args });
         assert.equal(functionName, 'process_claim');
-        return { data: null, error: null };
+        return { data: 'claim-123', error: null };
       },
     } as never;
 
@@ -359,28 +330,23 @@ test(
         staff_id: 'staff-1',
         staff_name: 'Staff One',
       },
+      claim_verification: null,
     });
-    assert.deepEqual(custodyUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          custody_status: 'claimed_by_student',
-        },
-      },
-    ]);
+    assert.deepEqual(JSON.parse(res.body), {
+      success: true,
+      claim_id: 'claim-123',
+    });
 
     await app.close();
   }
 );
 
 test(
-  'POST /claims/process allows linking a pending missing post and promotes it to accepted',
+  'POST /claims/process allows linking a pending missing post without a second route-level promotion',
   { concurrency: false },
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
-    const custodyUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
-    const postUpdates: Array<{ values: Record<string, unknown>; postId: number }> = [];
 
     const fakeSupabase = {
       from(table: string) {
@@ -462,7 +428,7 @@ test(
           return {
             select(columns: string) {
               return {
-                eq(column: string, value: string) {
+                eq(column: string, _value: string) {
                   assert.equal(column, 'item_id');
 
                   return {
@@ -476,13 +442,7 @@ test(
                           error: { code: 'PGRST116' },
                         };
                       }
-
-                      assert.equal(columns, 'claim_id');
-                      assert.equal(value, 'found-item-42');
-                      return {
-                        data: { claim_id: 'claim-123' },
-                        error: null,
-                      };
+                      throw new Error(`Unexpected claim_table select columns: ${columns}`);
                     },
                   };
                 },
@@ -518,48 +478,12 @@ test(
           };
         }
 
-        if (table === 'custody_record_table') {
-          return {
-            insert() {
-              return Promise.resolve({ error: null });
-            },
-          };
-        }
-
-        if (table === 'item_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  custodyUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
-        if (table === 'post_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: number) {
-                  assert.equal(column, 'post_id');
-                  postUpdates.push({ values, postId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
         throw new Error(`Unexpected table: ${table}`);
       },
       async rpc(functionName: string, args: Record<string, unknown>) {
         rpcCalls.push({ functionName, args });
         assert.equal(functionName, 'process_claim');
-        return { data: null, error: null };
+        return { data: 'claim-pending-link-123', error: null };
       },
     } as never;
 
@@ -595,22 +519,10 @@ test(
 
     assert.equal(res.statusCode, 200);
     assert.equal(rpcCalls.length, 1);
-    assert.deepEqual(postUpdates, [
-      {
-        postId: 24,
-        values: {
-          status: 'accepted',
-        },
-      },
-    ]);
-    assert.deepEqual(custodyUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          custody_status: 'claimed_by_student',
-        },
-      },
-    ]);
+    assert.deepEqual(JSON.parse(res.body), {
+      success: true,
+      claim_id: 'claim-pending-link-123',
+    });
 
     await app.close();
   }
@@ -829,11 +741,7 @@ test(
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
-    const claimUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
-    const custodyUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
-    const postUpdates: Array<{ values: Record<string, unknown>; postId: number }> = [];
     let verificationCalled = false;
-    let completionCalled = false;
 
     const fakeSupabase = {
       from(table: string) {
@@ -897,7 +805,7 @@ test(
           return {
             select(columns: string) {
               return {
-                eq(column: string, value: string) {
+                eq(column: string, _value: string) {
                   assert.equal(column, 'item_id');
 
                   return {
@@ -913,60 +821,9 @@ test(
                           error: { code: 'PGRST116' },
                         };
                       }
-
-                      assert.equal(columns, 'claim_id');
-                      assert.equal(value, 'found-item-42');
-                      return {
-                        data: { claim_id: 'claim-guard-direct-123' },
-                        error: null,
-                      };
+                      throw new Error(`Unexpected claim_table select columns: ${columns}`);
                     },
                   };
-                },
-              };
-            },
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  claimUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
-        if (table === 'post_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: number) {
-                  assert.equal(column, 'post_id');
-                  postUpdates.push({ values, postId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
-        if (table === 'custody_record_table') {
-          return {
-            insert() {
-              return Promise.resolve({ error: null });
-            },
-          };
-        }
-
-        if (table === 'item_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  custodyUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
                 },
               };
             },
@@ -1005,7 +862,7 @@ test(
       async rpc(functionName: string, args: Record<string, unknown>) {
         rpcCalls.push({ functionName, args });
         assert.equal(functionName, 'process_claim');
-        return { data: null, error: null };
+        return { data: 'claim-guard-direct-123', error: null };
       },
     } as never;
 
@@ -1018,9 +875,6 @@ test(
       verifyClaimSubmission: async () => {
         verificationCalled = true;
         throw new Error('verifyClaimSubmission should not run for direct guard claims');
-      },
-      completeClaimVerificationSession: async () => {
-        completionCalled = true;
       },
     });
 
@@ -1059,48 +913,26 @@ test(
         staff_id: 'guard-1',
         staff_name: 'Guard One',
       },
+      claim_verification: {
+        verification_method: 'guard_qr',
+      },
     });
-    assert.deepEqual(postUpdates, [
-      {
-        postId: 42,
-        values: {
-          status: 'accepted',
-        },
-      },
-    ]);
-    assert.deepEqual(claimUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          verification_method: 'guard_qr',
-        },
-      },
-    ]);
-    assert.deepEqual(custodyUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          custody_status: 'claimed_by_student',
-        },
-      },
-    ]);
+    assert.deepEqual(JSON.parse(res.body), {
+      success: true,
+      claim_id: 'claim-guard-direct-123',
+    });
     assert.equal(verificationCalled, false);
-    assert.equal(completionCalled, false);
 
     await app.close();
   }
 );
 
 test(
-  'POST /claims/process completes a guard QR claim using the verified claimer identity',
+  'POST /claims/process passes finalized guard QR verification metadata into the RPC',
   { concurrency: false },
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
-    const claimUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
-    const custodyUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
-    const postUpdates: Array<{ values: Record<string, unknown>; postId: number }> = [];
-    const completedSessions: Array<Record<string, unknown>> = [];
 
     const fakeSupabase = {
       from(table: string) {
@@ -1164,7 +996,7 @@ test(
           return {
             select(columns: string) {
               return {
-                eq(column: string, value: string) {
+                eq(column: string, _value: string) {
                   assert.equal(column, 'item_id');
 
                   return {
@@ -1180,60 +1012,9 @@ test(
                           error: { code: 'PGRST116' },
                         };
                       }
-
-                      assert.equal(columns, 'claim_id');
-                      assert.equal(value, 'found-item-42');
-                      return {
-                        data: { claim_id: 'claim-guard-123' },
-                        error: null,
-                      };
+                      throw new Error(`Unexpected claim_table select columns: ${columns}`);
                     },
                   };
-                },
-              };
-            },
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  claimUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
-        if (table === 'custody_record_table') {
-          return {
-            insert() {
-              return Promise.resolve({ error: null });
-            },
-          };
-        }
-
-        if (table === 'post_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: number) {
-                  assert.equal(column, 'post_id');
-                  postUpdates.push({ values, postId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
-        if (table === 'item_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  custodyUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
                 },
               };
             },
@@ -1272,7 +1053,7 @@ test(
       async rpc(functionName: string, args: Record<string, unknown>) {
         rpcCalls.push({ functionName, args });
         assert.equal(functionName, 'process_claim');
-        return { data: null, error: null };
+        return { data: 'claim-guard-123', error: null };
       },
     } as never;
 
@@ -1293,9 +1074,6 @@ test(
           profile_picture_url: null,
         },
       }),
-      completeClaimVerificationSession: async (input: unknown) => {
-        completedSessions.push(input as unknown as Record<string, unknown>);
-      },
     });
 
     setAuthSupabaseClientFactoryForTests(() =>
@@ -1338,50 +1116,28 @@ test(
         staff_id: 'guard-1',
         staff_name: 'Guard One',
       },
+      claim_verification: {
+        claim_verification_session_id: 'verification-1',
+        claim_qr_session_id: 'qr-1',
+        verification_method: 'guard_qr',
+        verified_claimer_user_id: 'claimer-1',
+      },
     });
-    assert.deepEqual(claimUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          verified_claimer_user_id: 'claimer-1',
-          claim_verification_session_id: 'verification-1',
-          verification_method: 'guard_qr',
-        },
-      },
-    ]);
-    assert.deepEqual(postUpdates, [
-      {
-        postId: 42,
-        values: {
-          status: 'accepted',
-        },
-      },
-    ]);
-    assert.deepEqual(custodyUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          custody_status: 'claimed_by_student',
-        },
-      },
-    ]);
-    assert.equal(completedSessions.length, 1);
-    assert.equal(completedSessions[0]?.claim_verification_session_id, 'verification-1');
-    assert.equal(completedSessions[0]?.claim_qr_session_id, 'qr-1');
-    assert.equal(completedSessions[0]?.verification_method, 'guard_qr');
+    assert.deepEqual(JSON.parse(res.body), {
+      success: true,
+      claim_id: 'claim-guard-123',
+    });
 
     await app.close();
   }
 );
 
 test(
-  'POST /claims/process returns success after the claim commit even when post-commit custody finalization fails',
+  'POST /claims/process returns failure when the process_claim RPC fails',
   { concurrency: false },
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
-    const claimUpdates: Array<{ values: Record<string, unknown>; itemId: string }> = [];
-    const postUpdates: Array<{ values: Record<string, unknown>; postId: number }> = [];
 
     const fakeSupabase = {
       from(table: string) {
@@ -1428,7 +1184,7 @@ test(
           return {
             select(columns: string) {
               return {
-                eq(column: string, value: string) {
+                eq(column: string, _value: string) {
                   assert.equal(column, 'item_id');
 
                   return {
@@ -1444,38 +1200,9 @@ test(
                           error: { code: 'PGRST116' },
                         };
                       }
-
-                      assert.equal(columns, 'claim_id');
-                      assert.equal(value, 'found-item-42');
-                      return {
-                        data: { claim_id: 'claim-post-commit-123' },
-                        error: null,
-                      };
+                      throw new Error(`Unexpected claim_table select columns: ${columns}`);
                     },
                   };
-                },
-              };
-            },
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: string) {
-                  assert.equal(column, 'item_id');
-                  claimUpdates.push({ values, itemId: value });
-                  return Promise.resolve({ error: null });
-                },
-              };
-            },
-          };
-        }
-
-        if (table === 'post_table') {
-          return {
-            update(values: Record<string, unknown>) {
-              return {
-                eq(column: string, value: number) {
-                  assert.equal(column, 'post_id');
-                  postUpdates.push({ values, postId: value });
-                  return Promise.resolve({ error: null });
                 },
               };
             },
@@ -1514,7 +1241,13 @@ test(
       async rpc(functionName: string, args: Record<string, unknown>) {
         rpcCalls.push({ functionName, args });
         assert.equal(functionName, 'process_claim');
-        return { data: null, error: null };
+        return {
+          data: null,
+          error: {
+            code: 'PGRST204',
+            message: 'process_claim rpc failed',
+          },
+        };
       },
     } as never;
 
@@ -1524,9 +1257,6 @@ test(
       getUserName: async () => 'Guard One',
       logAudit: async () => {},
       canGuardAccessClaimReview: async () => true,
-      updatePostCustodyStatus: async () => {
-        throw new Error('late custody failure');
-      },
     });
 
     setAuthSupabaseClientFactoryForTests(() =>
@@ -1550,27 +1280,13 @@ test(
       },
     });
 
-    assert.equal(res.statusCode, 200);
+    assert.equal(res.statusCode, 500);
     assert.equal(rpcCalls.length, 1);
-    assert.deepEqual(postUpdates, [
-      {
-        postId: 42,
-        values: {
-          status: 'accepted',
-        },
-      },
-    ]);
-    assert.deepEqual(claimUpdates, [
-      {
-        itemId: 'found-item-42',
-        values: {
-          verification_method: 'guard_qr',
-        },
-      },
-    ]);
     assert.deepEqual(JSON.parse(res.body), {
-      success: true,
-      claim_id: 'claim-post-commit-123',
+      statusCode: 500,
+      code: 'BACKEND_CONFIGURATION_ERROR',
+      error: 'Internal Server Error',
+      message: 'Failed to process claim',
     });
 
     await app.close();

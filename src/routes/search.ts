@@ -6,6 +6,7 @@ import { SearchItemsRequest, SearchItemsStaffRequest } from '../types/search.js'
 import logger from '../utils/logger.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
 import { buildApiErrorResponse, createHttpError } from '../utils/http-error.js';
+import { buildSearchQueryFromSource } from '../utils/search-metadata.js';
 
 interface MatchMissingItemRequest {
   post_id: string;
@@ -13,8 +14,8 @@ interface MatchMissingItemRequest {
 
 interface MatchResult {
   success: boolean;
-  matches: any[];
-  missing_post?: any;
+  matches: Record<string, unknown>[];
+  missing_post?: Record<string, unknown>;
   total_matches?: number;
 }
 
@@ -333,8 +334,13 @@ export default async function searchRoutes(server: FastifyInstance) {
         return { success: false, matches: [] };
       }
 
-      // Search for matching found items using full-text search
-      const searchQuery = `${itemData.item_name || ''} ${itemData.item_description || ''}`.trim();
+      // Search for matching found items using full-text search over blended metadata.
+      const searchQuery = buildSearchQueryFromSource({
+        itemName: itemData.item_name,
+        itemDescription: itemData.item_description,
+        category: itemData.category,
+        itemMetadata: itemData.item_metadata,
+      });
 
       if (!searchQuery) {
         return { success: true, matches: [], missing_post: missingPost, total_matches: 0 };
@@ -361,7 +367,8 @@ export default async function searchRoutes(server: FastifyInstance) {
 
       // Filter out the missing post itself and only include found items
       const filteredMatches = (matches || []).filter(
-        (match: any) => match.post_id !== parseInt(post_id) && match.item_type === 'found'
+        (match: Record<string, unknown>) =>
+          match.post_id !== parseInt(post_id) && match.item_type === 'found'
       );
 
       // Log to audit trail

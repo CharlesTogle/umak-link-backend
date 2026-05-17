@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import logger from '../utils/logger.js';
+import { buildSearchQueryFromAttributes } from '../utils/search-metadata.js';
 import { GENERAL_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
 const CREATE_POST_CATEGORIES = [
@@ -26,6 +27,51 @@ const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-lite';
 
 function normalizeGeminiModelName(modelName: string): string {
   return modelName.replace(/^models\//, '');
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (typeof value === 'string') {
+    const normalized = normalizeOptionalString(value);
+    return normalized ? [normalized] : [];
+  }
+
+  if (!Array.isArray(value)) return [];
+
+  return Array.from(
+    new Set(
+      value
+        .flatMap((entry) => {
+          const normalized = normalizeOptionalString(entry);
+          return normalized ? [normalized] : [];
+        })
+        .filter((entry) => entry.length > 0)
+    )
+  );
+}
+
+function mergeUniqueTerms(...values: Array<string | null | undefined | string[]>): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+
+  for (const value of values) {
+    const entries = Array.isArray(value) ? value : [value];
+    for (const entry of entries) {
+      const normalized = normalizeOptionalString(entry);
+      if (!normalized) continue;
+      const lowered = normalized.toLowerCase();
+      if (seen.has(lowered)) continue;
+      seen.add(lowered);
+      merged.push(normalized);
+    }
+  }
+
+  return merged;
 }
 
 class GeminiService {
@@ -170,13 +216,24 @@ class GeminiService {
       throw new RateLimitError('Rate limit exceeded');
     }
 
-    const prompt = `Analyze this image of a lost or found item. Identify the main object, its color, brand, model, material, and fixed physical features visible in the image.
+    const prompt = `Analyze this image of a lost or found item and extract only objective, visually grounded search attributes.
 
-Generate a search query string using only objective attributes.
-- Use AND to pair adjectives and nouns.
-- Use OR for alternatives in the same attribute category.
-- Output 10 to 20 keyword phrases.
-- Output only the final query string without explanations or markdown.`;
+Rules:
+- Infer only what is directly visible or strongly implied by the image.
+- Do not invent ownership, use case, or hidden details.
+- Return valid JSON only. No markdown. No explanation.
+- Keep terms short and practical for lost-and-found search.
+- Use empty arrays when an attribute is not visible.
+
+Respond with:
+{
+  "caption": "short literal description",
+  "main_objects": ["primary object"],
+  "synonyms": ["alternative object name"],
+  "descriptive_words": ["color", "material", "fixed feature"],
+  "potential_brands": ["brand if visible or strongly implied"],
+  "visible_text": ["readable text on the item"]
+}`;
 
     const result = await withTimeout(
       this.model.generateContent([
@@ -192,22 +249,16 @@ Generate a search query string using only objective attributes.
       'Gemini reverse-image search'
     );
 
-    const rawQuery = result.response
-      .text()
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .replace(/['"]/g, '')
-      .trim();
-
-    const baseQuery = input.searchValue?.trim() || '';
-    if (baseQuery && rawQuery) {
-      return `${baseQuery} OR ${rawQuery}`;
-    }
-    if (rawQuery) {
-      return rawQuery;
-    }
-    return baseQuery;
+    const attributes = this.parseReverseImageSearchAttributes(result.response.text());
+    return buildSearchQueryFromAttributes({
+      searchValue: input.searchValue,
+      caption: attributes.caption,
+      mainObjects: attributes.main_objects,
+      synonyms: attributes.synonyms,
+      descriptiveWords: attributes.descriptive_words,
+      potentialBrands: attributes.potential_brands,
+      visibleText: attributes.visible_text,
+    });
   }
 
   private buildPrompt(item: ItemData): string {
@@ -224,6 +275,11 @@ Generate the following:
 3. Brand (if mentioned or identifiable)
 4. Condition (good/fair/poor/unknown)
 5. Estimated value range (low/medium/high/unknown)
+6. Caption (short literal description of the item)
+7. Main objects (1-3 core object labels)
+8. Synonyms (0-5 alternative search words)
+9. Descriptive words (2-6 visible physical descriptors)
+10. Potential brands (0-3 likely or mentioned brands)
 
 Respond in JSON format:
 {
@@ -231,7 +287,12 @@ Respond in JSON format:
   "color": "color or null",
   "brand": "brand or null",
   "condition": "condition",
-  "value_range": "range"
+  "value_range": "range",
+  "caption": "short caption or null",
+  "main_objects": ["object1"],
+  "synonyms": ["synonym1"],
+  "descriptive_words": ["descriptor1"],
+  "potential_brands": ["brand1"]
 }`;
   }
 
@@ -274,13 +335,30 @@ Respond with:
         throw new Error('No JSON found in response');
       }
 
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      const keywords = normalizeStringArray(parsed.keywords);
+      const color = normalizeOptionalString(parsed.color);
+      const brand = normalizeOptionalString(parsed.brand);
+      const caption = normalizeOptionalString(parsed.caption);
+      const mainObjects = normalizeStringArray(parsed.main_objects);
+      const synonyms = normalizeStringArray(parsed.synonyms);
+      const descriptiveWords = normalizeStringArray(parsed.descriptive_words);
+      const potentialBrands = mergeUniqueTerms(
+        normalizeStringArray(parsed.potential_brands),
+        brand
+      );
+
       return {
-        keywords: parsed.keywords || [],
-        color: parsed.color || null,
-        brand: parsed.brand || null,
-        condition: parsed.condition || 'unknown',
-        value_range: parsed.value_range || 'unknown',
+        keywords,
+        color,
+        brand,
+        condition: normalizeOptionalString(parsed.condition) || 'unknown',
+        value_range: normalizeOptionalString(parsed.value_range) || 'unknown',
+        caption,
+        main_objects: mainObjects,
+        synonyms,
+        descriptive_words: descriptiveWords,
+        potential_brands: potentialBrands,
       };
     } catch {
       logger.error({ text }, 'Failed to parse Gemini response');
@@ -290,6 +368,45 @@ Respond with:
         brand: null,
         condition: 'unknown',
         value_range: 'unknown',
+        caption: null,
+        main_objects: [],
+        synonyms: [],
+        descriptive_words: [],
+        potential_brands: [],
+      };
+    }
+  }
+
+  private parseReverseImageSearchAttributes(text: string): ReverseImageSearchAttributes {
+    try {
+      const raw = text
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in reverse image response');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      return {
+        caption: normalizeOptionalString(parsed.caption),
+        main_objects: normalizeStringArray(parsed.main_objects),
+        synonyms: normalizeStringArray(parsed.synonyms),
+        descriptive_words: normalizeStringArray(parsed.descriptive_words),
+        potential_brands: normalizeStringArray(parsed.potential_brands),
+        visible_text: normalizeStringArray(parsed.visible_text),
+      };
+    } catch {
+      logger.error({ text }, 'Failed to parse Gemini reverse image attributes');
+      return {
+        caption: null,
+        main_objects: [],
+        synonyms: [],
+        descriptive_words: [],
+        potential_brands: [],
+        visible_text: [],
       };
     }
   }
@@ -390,6 +507,11 @@ export interface Metadata {
   brand: string | null;
   condition: string;
   value_range: string;
+  caption?: string | null;
+  main_objects?: string[];
+  synonyms?: string[];
+  descriptive_words?: string[];
+  potential_brands?: string[];
 }
 
 export interface CreatePostAutofillInput {
@@ -410,6 +532,15 @@ export interface ReverseImageSearchInput {
   imageBase64: string;
   mimeType: string;
   searchValue?: string;
+}
+
+interface ReverseImageSearchAttributes {
+  caption: string | null;
+  main_objects: string[];
+  synonyms: string[];
+  descriptive_words: string[];
+  potential_brands: string[];
+  visible_text: string[];
 }
 
 export class RateLimitError extends Error {

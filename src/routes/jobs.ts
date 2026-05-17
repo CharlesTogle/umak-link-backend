@@ -5,6 +5,7 @@ import { getGeminiService, RateLimitError } from '../services/gemini.js';
 import { GenerateMetadataBatchResponse, ProcessPendingMatchResponse } from '../types/notifications.js';
 import { getAuthorizationHeader } from '../utils/http-headers.js';
 import logger from '../utils/logger.js';
+import { buildSearchQueryFromSource } from '../utils/search-metadata.js';
 
 interface PendingMatchViewRow {
   id: number;
@@ -31,35 +32,6 @@ function toNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function toStringArray(value: unknown): string[] {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? [trimmed] : [];
-  }
-
-  if (!Array.isArray(value)) return [];
-
-  return value
-    .flatMap((entry) => (typeof entry === 'string' ? [entry.trim()] : []))
-    .filter((entry) => entry.length > 0);
-}
-
-function buildPendingMatchSearchSeed(record: PendingMatchViewRow): string {
-  const metadata = record.item_metadata ?? {};
-  const parts = [
-    toNonEmptyString(record.item_name),
-    toNonEmptyString(record.item_description),
-    ...toStringArray(metadata.keywords),
-    ...toStringArray(metadata.main_objects),
-    ...toStringArray(metadata.descriptive_words),
-    ...toStringArray(metadata.potential_brands),
-    toNonEmptyString(metadata.color),
-    toNonEmptyString(metadata.brand),
-  ].filter((value): value is string => Boolean(value));
-
-  return Array.from(new Set(parts)).join(' OR ');
 }
 
 function detectMimeType(contentType: string | null, imageUrl: string): string {
@@ -183,7 +155,11 @@ export default async function jobsRoutes(server: FastifyInstance) {
     }
 
     const geminiService = getGeminiService();
-    const searchSeed = buildPendingMatchSearchSeed(record);
+    const searchSeed = buildSearchQueryFromSource({
+      itemName: record.item_name,
+      itemDescription: record.item_description,
+      itemMetadata: record.item_metadata,
+    });
     let searchQuery = searchSeed;
 
     if (record.image_link) {

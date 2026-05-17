@@ -6,6 +6,41 @@ import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
 import { AUDIT_TIMEOUT_MS, withTimeout } from '../utils/timeout.js';
 
+type AdminRouteSupabaseClient = Pick<ReturnType<typeof getSupabaseClient>, 'from' | 'rpc'>;
+
+export interface AdminRouteServices {
+  getSupabaseClient: () => AdminRouteSupabaseClient;
+}
+
+interface AdminRoutesOptions {
+  services?: AdminRouteServices;
+}
+
+interface ManilaDateTimeParts {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+  second: string;
+}
+
+interface AuditLogViewRow {
+  log_id: string;
+  user_id: string | null;
+  user_name: string | null;
+  email: string | null;
+  profile_picture_url: string | null;
+  action_type: string | null;
+  details: Record<string, unknown> | null;
+  timestamp: string | null;
+  timestamp_local?: string | null;
+}
+
+const PHILIPPINE_TIMEZONE = 'Asia/Manila';
+const PHILIPPINE_UTC_OFFSET = '+08:00';
+const HAS_EXPLICIT_OFFSET_PATTERN = /(Z|[+-]\d{2}:\d{2})$/;
+
 const HIDDEN_ADMIN_AUDIT_ACTION_TYPES = [
   'custody_attempt_created',
   'custody_attempt_cancelled',
@@ -26,7 +61,92 @@ function applyAuditVisibilityFilter<
   return query.not('action_type', 'in', `(${hiddenActionTypes})`);
 }
 
-export default async function adminRoutes(server: FastifyInstance) {
+function getManilaDateTimeParts(date: Date): ManilaDateTimeParts {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: PHILIPPINE_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? '00';
+
+  return {
+    year: getPart('year'),
+    month: getPart('month'),
+    day: getPart('day'),
+    hour: getPart('hour'),
+    minute: getPart('minute'),
+    second: getPart('second'),
+  };
+}
+
+function getOptionalString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseAuditTimestamp(value: unknown): Date | null {
+  const rawValue = getOptionalString(value);
+  if (!rawValue) return null;
+
+  // Audit log view timestamps are returned without an offset and represent UTC.
+  const normalizedValue = HAS_EXPLICIT_OFFSET_PATTERN.test(rawValue)
+    ? rawValue
+    : `${rawValue}Z`;
+  const parsed = new Date(normalizedValue);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function formatManilaIso(date: Date): string {
+  const parts = getManilaDateTimeParts(date);
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${PHILIPPINE_UTC_OFFSET}`;
+}
+
+function mapAuditLogResponse(log: AuditLogViewRow) {
+  const parsedTimestamp = parseAuditTimestamp(log.timestamp);
+  const fallbackTimestamp = getOptionalString(log.timestamp) ?? getOptionalString(log.timestamp_local);
+  const fallbackTimestampLocal =
+    getOptionalString(log.timestamp_local) ?? fallbackTimestamp;
+  const timestamp = parsedTimestamp?.toISOString() ?? fallbackTimestamp;
+  const timestampLocal = parsedTimestamp
+    ? formatManilaIso(parsedTimestamp)
+    : fallbackTimestampLocal;
+
+  return {
+    audit_id: log.log_id,
+    user_id: log.user_id,
+    action: log.action_type,
+    table_name: 'audit_table',
+    record_id: log.log_id,
+    changes: log.details,
+    timestamp,
+    timestamp_local: timestampLocal,
+    user_table: {
+      user_id: log.user_id,
+      user_name: log.user_name,
+      email: log.email,
+      profile_picture_url: log.profile_picture_url,
+    },
+  };
+}
+
+export default async function adminRoutes(server: FastifyInstance, options: AdminRoutesOptions = {}) {
+  const services: AdminRouteServices = {
+    getSupabaseClient: options.services?.getSupabaseClient ?? getSupabaseClient,
+  };
+
   // GET /admin/users - List users with filters
   server.get<{
     Querystring: {
@@ -270,7 +390,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const { action, table_name, record_id, changes } = request.body;
       const userId = request.user?.user_id;
 
@@ -311,7 +431,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
 
@@ -329,22 +449,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       }
 
       // Map view fields to expected frontend format
-      const logs = (data || []).map((log) => ({
-        audit_id: log.log_id,
-        user_id: log.user_id,
-        action: log.action_type,
-        table_name: 'audit_table',
-        record_id: log.log_id,
-        changes: log.details,
-        timestamp: log.timestamp,
-        timestamp_local: log.timestamp_local,
-        user_table: {
-          user_id: log.user_id,
-          user_name: log.user_name,
-          email: log.email,
-          profile_picture_url: log.profile_picture_url,
-        },
-      }));
+      const logs = (data || []).map((log) => mapAuditLogResponse(log as AuditLogViewRow));
 
       return { logs };
     }
@@ -366,7 +471,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const logId = request.params.id;
 
       const { data: log, error } = await supabase
@@ -381,22 +486,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       }
 
       // Map view fields to expected frontend format
-      return {
-        audit_id: log.log_id,
-        user_id: log.user_id,
-        action: log.action_type,
-        table_name: 'audit_table',
-        record_id: log.log_id,
-        changes: log.details,
-        timestamp: log.timestamp,
-        timestamp_local: log.timestamp_local,
-        user_table: {
-          user_id: log.user_id,
-          user_name: log.user_name,
-          email: log.email,
-          profile_picture_url: log.profile_picture_url,
-        },
-      };
+      return mapAuditLogResponse(log as AuditLogViewRow);
     }
   );
 
@@ -423,7 +513,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const userId = request.params.userId;
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
@@ -443,22 +533,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       }
 
       // Map view fields to expected frontend format
-      const logs = (data || []).map((log) => ({
-        audit_id: log.log_id,
-        user_id: log.user_id,
-        action: log.action_type,
-        table_name: 'audit_table',
-        record_id: log.log_id,
-        changes: log.details,
-        timestamp: log.timestamp,
-        timestamp_local: log.timestamp_local,
-        user_table: {
-          user_id: log.user_id,
-          user_name: log.user_name,
-          email: log.email,
-          profile_picture_url: log.profile_picture_url,
-        },
-      }));
+      const logs = (data || []).map((log) => mapAuditLogResponse(log as AuditLogViewRow));
 
       return { logs };
     }
@@ -487,7 +562,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const actionType = request.params.actionType;
       const { limit = 20, offset = 0 } = request.query as { limit?: number; offset?: number };
       const { limit: limitNum, offset: offsetNum } = parsePagination(limit, offset);
@@ -513,22 +588,7 @@ export default async function adminRoutes(server: FastifyInstance) {
       }
 
       // Map view fields to expected frontend format
-      const logs = (data || []).map((log) => ({
-        audit_id: log.log_id,
-        user_id: log.user_id,
-        action: log.action_type,
-        table_name: 'audit_table',
-        record_id: log.log_id,
-        changes: log.details,
-        timestamp: log.timestamp,
-        timestamp_local: log.timestamp_local,
-        user_table: {
-          user_id: log.user_id,
-          user_name: log.user_name,
-          email: log.email,
-          profile_picture_url: log.profile_picture_url,
-        },
-      }));
+      const logs = (data || []).map((log) => mapAuditLogResponse(log as AuditLogViewRow));
 
       return { logs };
     }

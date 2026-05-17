@@ -6,6 +6,7 @@ import { setAuthSupabaseClientFactoryForTests } from '../middleware/auth.js';
 import postsRoutes from '../routes/posts.js';
 import { canGuardAccessClaimReview } from '../services/claim-verification.js';
 import { UserType } from '../types/auth.js';
+import type { AuditLogParams } from '../utils/audit-logger.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test_secret_for_tests';
 
@@ -997,6 +998,131 @@ test('PUT /posts/:id/status without auth returns 401', async () => {
   assert.equal(res.statusCode, 401);
   await app.close();
 });
+
+test(
+  'PUT /posts/:id/status rejected with a reason updates the row and writes one audit entry',
+  { concurrency: false },
+  async (t) => {
+    const app = Fastify();
+    const updateCalls: Array<Record<string, unknown>> = [];
+    const auditCalls: Array<{
+      userId: string;
+      actionType: string;
+      details: Record<string, unknown>;
+      recordId?: string;
+    }> = [];
+    const fakeSupabase = {
+      from(table: string) {
+        if (table === 'post_public_view') {
+          return {
+            select(columns: string) {
+              assert.equal(columns, 'item_name, poster_name');
+
+              return {
+                eq(column: string, value: number) {
+                  assert.equal(column, 'post_id');
+                  assert.equal(value, 42);
+
+                  return {
+                    async single() {
+                      return {
+                        data: {
+                          item_name: 'Wallet',
+                          poster_name: 'User One',
+                        },
+                        error: null,
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }
+
+        if (table === 'post_table') {
+          return {
+            update(values: Record<string, unknown>) {
+              updateCalls.push(values);
+
+              return {
+                eq(column: string, value: number) {
+                  assert.equal(column, 'post_id');
+                  assert.equal(value, 42);
+
+                  return Promise.resolve({
+                    error: null,
+                  });
+                },
+              };
+            },
+          };
+        }
+
+        throw new Error(`Unexpected table access: ${table}`);
+      },
+    } as never;
+
+    await app.register(postsRoutes, {
+      prefix: '/posts',
+      statusRouteOptions: {
+        getSupabase: () => fakeSupabase,
+        auditLogger: async (params: AuditLogParams) => {
+          auditCalls.push({
+            userId: params.userId,
+            actionType: params.actionType,
+            details: params.details as Record<string, unknown>,
+            recordId: params.recordId,
+          });
+        },
+        getAuditUserName: async () => 'Staff User',
+      },
+    });
+
+    setAuthSupabaseClientFactoryForTests(() =>
+      createPostsAuthSupabase('Staff', 'staff-1@umak.edu.ph')
+    );
+    t.after(() => setAuthSupabaseClientFactoryForTests(null));
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/posts/42/status',
+      headers: {
+        authorization: `Bearer ${createToken('Staff', 'staff-1', 'staff-1@umak.edu.ph')}`,
+      },
+      payload: {
+        status: 'rejected',
+        rejection_reason: 'Incomplete evidence',
+      },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(JSON.parse(res.body), { success: true });
+    assert.deepEqual(updateCalls, [
+      {
+        status: 'rejected',
+        rejection_reason: 'Incomplete evidence',
+      },
+    ]);
+    assert.equal(auditCalls.length, 1);
+    assert.deepEqual(auditCalls[0], {
+      userId: 'staff-1',
+      actionType: 'post_rejected',
+      recordId: '42',
+      details: {
+        message: 'Staff User rejected post "Wallet"',
+        post_id: '42',
+        item_name: 'Wallet',
+        new_status: 'rejected',
+        deleted_at: undefined,
+        rejection_reason: 'Incomplete evidence',
+        timestamp: auditCalls[0]?.details.timestamp,
+      },
+    });
+    assert.equal(typeof auditCalls[0]?.details.timestamp, 'string');
+    await app.close();
+  }
+);
 
 test('PUT /posts/items/:id/status without auth returns 401', async () => {
   const app = Fastify();

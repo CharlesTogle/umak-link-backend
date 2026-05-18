@@ -74,6 +74,90 @@ test('GET /auth/me rejects injected user_type claim', async () => {
   await app.close();
 });
 
+test('POST /auth/app-login-audit accepts guard users and records a UMak-LINK app audit', async () => {
+  const app = Fastify();
+  let capturedRpcArgs: Record<string, unknown> | null = null;
+
+  await app.register(authRoutes, {
+    prefix: '/auth',
+    services: {
+      getSupabaseClient: () =>
+        ({
+          from(table: string) {
+            assert.equal(table, 'user_table');
+            return {
+              select() {
+                return {
+                  eq(column: string, value: string) {
+                    assert.equal(column, 'user_id');
+                    assert.equal(value, 'guard-1');
+                    return {
+                      async single() {
+                        return {
+                          data: {
+                            user_id: 'guard-1',
+                            user_name: 'Guard User',
+                            email: 'guard-1@umak.edu.ph',
+                            profile_picture_url: null,
+                            user_type: 'Guard',
+                            notification_token: null,
+                          },
+                          error: null,
+                        };
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+          async rpc(functionName: string, args: Record<string, unknown>) {
+            assert.equal(functionName, 'insert_audit_log');
+            capturedRpcArgs = args;
+            return { data: 'audit-1', error: null };
+          },
+        }) as never,
+    },
+  });
+
+  const token = jwt.sign(
+    {
+      user_id: 'guard-1',
+      email: 'guard-1@umak.edu.ph',
+      user_type: 'Guard',
+    },
+    process.env.JWT_SECRET || 'test_secret_for_tests',
+    { algorithm: 'HS256' }
+  );
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/auth/app-login-audit',
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  });
+
+  assert.equal(res.statusCode, 202);
+  assert.deepEqual(JSON.parse(res.body), { success: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(capturedRpcArgs, {
+    p_user_id: 'guard-1',
+    p_action_type: 'account_login',
+    p_target_entity_type: 'user_table',
+    p_target_entity_id: 'guard-1',
+    p_details: {
+      message: 'Guard Guard User signed into UMak-LINK app',
+      login_source: 'umak_link_app',
+      user_type: 'Guard',
+      user_name: 'Guard User',
+      user_email: 'guard-1@umak.edu.ph',
+    },
+  });
+
+  await app.close();
+});
+
 test('POST /auth/portal-login-audit accepts guard users and records a guard portal audit', async () => {
   const app = Fastify();
   let capturedRpcArgs: Record<string, unknown> | null = null;

@@ -21,9 +21,12 @@ const JWT_SECRET: string = (() => {
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const ALLOWED_USER_TYPES: readonly UserType[] = ['User', 'Staff', 'Admin', 'Guard'];
-const APP_LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin'];
+const APP_LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin', 'Guard'];
 const PORTAL_LOGIN_AUDIT_USER_TYPES: readonly UserType[] = ['Staff', 'Admin', 'Guard'];
 type LoginAuditSource = 'umak_link_app' | 'admin_staff_portal';
+type RouteErrorReply = {
+  status: (code: number) => { send: (payload: unknown) => unknown };
+};
 
 export interface AuthRouteServices {
   getSupabaseClient: typeof getSupabaseClient;
@@ -94,6 +97,10 @@ function getPortalLoginDestination(userType: UserType): string {
   return 'staff portal';
 }
 
+function getLoginAuditForbiddenMessage(loginSource: LoginAuditSource): string {
+  return loginSource === 'umak_link_app' ? 'UMak-LINK access required' : 'Portal access required';
+}
+
 async function writeLoginAudit(
   supabase: ReturnType<typeof getSupabaseClient>,
   user: UserProfile,
@@ -148,6 +155,60 @@ async function writeLoginAudit(
       'Failed to insert login audit log'
     );
   }
+}
+
+async function resolveLoginAuditRequest(
+  request: FastifyRequest,
+  reply: RouteErrorReply,
+  getSupabaseClientFn: AuthRouteServices['getSupabaseClient'],
+  loginSource: LoginAuditSource
+): Promise<{ supabase: ReturnType<typeof getSupabaseClient>; user: UserProfile } | null> {
+  if (!request.user) {
+    sendRouteError(request, reply, 'Unauthorized', 401);
+    return null;
+  }
+
+  const supabase = getSupabaseClientFn();
+  const { data: user, error } = await supabase
+    .from('user_table')
+    .select('*')
+    .eq('user_id', request.user.user_id)
+    .single();
+
+  if (error || !user) {
+    logger.error(
+      { error, userId: request.user.user_id, loginSource },
+      'Failed to fetch user for login audit'
+    );
+    sendRouteError(request, reply, 'User not found', 404);
+    return null;
+  }
+
+  if (!isAllowedUserType(user.user_type)) {
+    logger.warn(
+      { userId: user.user_id, userType: user.user_type, loginSource },
+      'Blocked login audit for invalid role'
+    );
+    sendRouteError(request, reply, 'Unauthorized role', 403);
+    return null;
+  }
+
+  if (!shouldWriteLoginAudit(user.user_type, loginSource)) {
+    sendRouteError(request, reply, getLoginAuditForbiddenMessage(loginSource), 403);
+    return null;
+  }
+
+  return {
+    supabase,
+    user: {
+      user_id: user.user_id,
+      user_name: user.user_name,
+      email: user.email,
+      profile_picture_url: user.profile_picture_url,
+      user_type: user.user_type,
+      notification_token: user.notification_token,
+    },
+  };
 }
 
 async function uploadProfilePicture(
@@ -416,6 +477,40 @@ export default async function authRoutes(
   );
 
   server.post(
+    '/app-login-audit',
+    {
+      preHandler: [requireAuth],
+      schema: {
+        response: {
+          202: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+            },
+            required: ['success'],
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply): Promise<{ success: boolean }> => {
+      const loginAuditRequest = await resolveLoginAuditRequest(
+        request,
+        reply,
+        services.getSupabaseClient,
+        'umak_link_app'
+      );
+
+      if (!loginAuditRequest) {
+        return {} as { success: boolean };
+      }
+
+      void writeLoginAudit(loginAuditRequest.supabase, loginAuditRequest.user, 'umak_link_app');
+
+      return reply.code(202).send({ success: true });
+    }
+  );
+
+  server.post(
     '/portal-login-audit',
     {
       preHandler: [requireAuth],
@@ -432,50 +527,18 @@ export default async function authRoutes(
       },
     },
     async (request: FastifyRequest, reply): Promise<{ success: boolean }> => {
-      if (!request.user) {
-        sendRouteError(request, reply, 'Unauthorized', 401);
-        return {} as { success: boolean };
-      }
-
-      const supabase = services.getSupabaseClient();
-      const { data: user, error } = await supabase
-        .from('user_table')
-        .select('*')
-        .eq('user_id', request.user.user_id)
-        .single();
-
-      if (error || !user) {
-        logger.error({ error, userId: request.user.user_id }, 'Failed to fetch user for portal login audit');
-        sendRouteError(request, reply, 'User not found', 404);
-        return {} as { success: boolean };
-      }
-
-      if (!isAllowedUserType(user.user_type)) {
-        logger.warn(
-          { userId: user.user_id, userType: user.user_type },
-          'Blocked portal login audit for invalid role'
-        );
-        sendRouteError(request, reply, 'Unauthorized role', 403);
-        return {} as { success: boolean };
-      }
-
-      if (!PORTAL_LOGIN_AUDIT_USER_TYPES.includes(user.user_type)) {
-        sendRouteError(request, reply, 'Portal access required', 403);
-        return {} as { success: boolean };
-      }
-
-      void writeLoginAudit(
-        supabase,
-        {
-          user_id: user.user_id,
-          user_name: user.user_name,
-          email: user.email,
-          profile_picture_url: user.profile_picture_url,
-          user_type: user.user_type,
-          notification_token: user.notification_token,
-        },
+      const loginAuditRequest = await resolveLoginAuditRequest(
+        request,
+        reply,
+        services.getSupabaseClient,
         'admin_staff_portal'
       );
+
+      if (!loginAuditRequest) {
+        return {} as { success: boolean };
+      }
+
+      void writeLoginAudit(loginAuditRequest.supabase, loginAuditRequest.user, 'admin_staff_portal');
 
       return reply.code(202).send({ success: true });
     }

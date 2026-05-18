@@ -741,6 +741,12 @@ test(
   async (t) => {
     const app = Fastify();
     const rpcCalls: Array<{ functionName: string; args: Record<string, unknown> }> = [];
+    const auditCalls: Array<{
+      userId: string;
+      actionType: string;
+      details: Record<string, unknown>;
+      recordId?: string;
+    }> = [];
     let verificationCalled = false;
 
     const fakeSupabase = {
@@ -870,7 +876,19 @@ test(
       prefix: '/claims',
       getSupabase: () => fakeSupabase,
       getUserName: async () => 'Guard One',
-      logAudit: async () => {},
+      logAudit: async (params: {
+        userId: string;
+        actionType: string;
+        details: Record<string, unknown>;
+        recordId?: string;
+      }) => {
+        auditCalls.push({
+          userId: params.userId,
+          actionType: params.actionType,
+          details: params.details,
+          recordId: params.recordId,
+        });
+      },
       canGuardAccessClaimReview: async () => true,
       verifyClaimSubmission: async () => {
         verificationCalled = true;
@@ -922,6 +940,20 @@ test(
       claim_id: 'claim-guard-direct-123',
     });
     assert.equal(verificationCalled, false);
+    assert.equal(auditCalls.length, 1);
+    assert.equal(auditCalls[0]?.userId, 'guard-1');
+    assert.equal(auditCalls[0]?.actionType, 'claim_processed');
+    assert.equal(auditCalls[0]?.recordId, 'claim-guard-direct-123');
+    assert.equal(auditCalls[0]?.details.item_name, 'Wallet');
+    assert.equal(auditCalls[0]?.details.found_post_id, 42);
+    assert.equal(auditCalls[0]?.details.missing_post_id, null);
+    assert.equal(auditCalls[0]?.details.claimer_name, 'Claimed Student');
+    assert.equal(auditCalls[0]?.details.processed_by_staff, 'Guard One');
+    assert.equal(
+      auditCalls[0]?.details.message,
+      "Guard One processed Claimed Student's claim for Wallet"
+    );
+    assert.equal(typeof auditCalls[0]?.details.timestamp, 'string');
 
     await app.close();
   }

@@ -30,10 +30,7 @@ import staffCustodyRoutes from './routes/staff-custody.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const configuredAllowedOrigins =
-  process.env.ALLOWED_ORIGINS ||
-  process.env.CORS_ORIGIN ||
-  '';
+const configuredAllowedOrigins = process.env.ALLOWED_ORIGINS || '';
 const ALLOWED_ORIGINS = configuredAllowedOrigins;
 const ALLOWED_ORIGIN_LIST = ALLOWED_ORIGINS.split(',')
   .map((origin) => origin.trim())
@@ -57,10 +54,6 @@ function validateStartupConfig() {
 
   if (ALLOWED_ORIGIN_LIST.includes('*')) {
     logger.error('ALLOWED_ORIGINS contains *. This is not allowed for authenticated APIs.');
-  }
-
-  if (process.env.ALLOWED_ORIGINS && process.env.CORS_ORIGIN && process.env.ALLOWED_ORIGINS !== process.env.CORS_ORIGIN) {
-    logger.warn('ALLOWED_ORIGINS and legacy CORS_ORIGIN differ. Using ALLOWED_ORIGINS.');
   }
 
   if (!process.env.CUSTODY_AUTOMATION_STAFF_USER_ID) {

@@ -16,6 +16,20 @@ interface AdminRoutesOptions {
   services?: AdminRouteServices;
 }
 
+interface WeeklyStatsRpcRow {
+  week_start: string;
+  missing_count: number | null;
+  found_count: number | null;
+  reports_count: number | null;
+  pending_count: number | null;
+}
+
+interface ManilaDateParts {
+  year: number;
+  month: number;
+  day: number;
+}
+
 interface ManilaDateTimeParts {
   year: string;
   month: string;
@@ -59,6 +73,25 @@ function applyAuditVisibilityFilter<
   ).join(',');
 
   return query.not('action_type', 'in', `(${hiddenActionTypes})`);
+}
+
+function getManilaDateParts(now = new Date()): ManilaDateParts {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: PHILIPPINE_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+
+  const year = Number(parts.find((part) => part.type === 'year')?.value);
+  const month = Number(parts.find((part) => part.type === 'month')?.value);
+  const day = Number(parts.find((part) => part.type === 'day')?.value);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    throw new Error('Failed to resolve Asia/Manila date parts for weekly stats');
+  }
+
+  return { year, month, day };
 }
 
 function getManilaDateTimeParts(date: Date): ManilaDateTimeParts {
@@ -142,6 +175,72 @@ function mapAuditLogResponse(log: AuditLogViewRow) {
   };
 }
 
+function getWeeklyBucketStarts(now = new Date()): string[] {
+  const { year, month, day } = getManilaDateParts(now);
+  const today = new Date(Date.UTC(year, month - 1, day));
+  const currentWeekStart = new Date(today);
+  currentWeekStart.setUTCDate(today.getUTCDate() - today.getUTCDay());
+
+  const weekStarts: string[] = [];
+
+  for (let i = 11; i >= 0; i--) {
+    const weekStart = new Date(currentWeekStart);
+    weekStart.setUTCDate(currentWeekStart.getUTCDate() - i * 7);
+    weekStarts.push(toWeekKey(weekStart));
+  }
+
+  return weekStarts;
+}
+
+function formatWeekLabel(weekStart: string): string {
+  const monthNames = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+
+  const [, monthString, dayString] = normalizeWeekKey(weekStart).split('-');
+  const monthIndex = Number(monthString) - 1;
+  const day = Number(dayString);
+
+  return `${monthNames[monthIndex]} ${day}`;
+}
+
+function normalizeWeekKey(weekStart: string): string {
+  return weekStart.slice(0, 10);
+}
+
+function toWeekKey(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function buildWeeklyStatsResponse(rows: WeeklyStatsRpcRow[]) {
+  const rowMap = new Map(rows.map((row) => [normalizeWeekKey(row.week_start), row]));
+  const weekStarts = getWeeklyBucketStarts();
+
+  return {
+    weeks: weekStarts.map((weekStart) => formatWeekLabel(weekStart)),
+    series: {
+      missing: weekStarts.map((weekStart) => rowMap.get(weekStart)?.missing_count ?? 0),
+      found: weekStarts.map((weekStart) => rowMap.get(weekStart)?.found_count ?? 0),
+      reports: weekStarts.map((weekStart) => rowMap.get(weekStart)?.reports_count ?? 0),
+      pending: weekStarts.map((weekStart) => rowMap.get(weekStart)?.pending_count ?? 0),
+    },
+  };
+}
+
 export default async function adminRoutes(server: FastifyInstance, options: AdminRoutesOptions = {}) {
   const services: AdminRouteServices = {
     getSupabaseClient: options.services?.getSupabaseClient ?? getSupabaseClient,
@@ -166,7 +265,7 @@ export default async function adminRoutes(server: FastifyInstance, options: Admi
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const { user_type } = request.query;
 
       let query = supabase
@@ -223,7 +322,7 @@ export default async function adminRoutes(server: FastifyInstance, options: Admi
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const actorId = request.user?.user_id;
       const userId = request.params.id;
       const { role, previous_role } = request.body;
@@ -334,7 +433,7 @@ export default async function adminRoutes(server: FastifyInstance, options: Admi
       },
     },
     async (request): Promise<DashboardStats> => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const dateRange = request.query.date_range || 'all';
 
       const { data, error } = await supabase.rpc('get_dashboard_stats', {
@@ -607,84 +706,15 @@ export default async function adminRoutes(server: FastifyInstance, options: Admi
       },
     },
     async () => {
-      const supabase = getSupabaseClient();
-      const weeks: string[] = [];
-      const missing: number[] = [];
-      const found: number[] = [];
-      const reports: number[] = [];
-      const pending: number[] = [];
+      const supabase = services.getSupabaseClient();
+      const { data, error } = await supabase.rpc('get_admin_weekly_stats');
 
-      const today = new Date();
-      const monthNames = [
-        'Jan',
-        'Feb',
-        'Mar',
-        'Apr',
-        'May',
-        'Jun',
-        'Jul',
-        'Aug',
-        'Sep',
-        'Oct',
-        'Nov',
-        'Dec',
-      ];
-
-      // Build promises for all 12 weeks of data
-      const promises = [];
-
-      for (let i = 11; i >= 0; i--) {
-        const weekStart = new Date(today);
-        weekStart.setDate(weekStart.getDate() - weekStart.getDay() - i * 7);
-        weekStart.setHours(0, 0, 0, 0);
-
-        const weekEnd = new Date(weekStart);
-        weekEnd.setDate(weekEnd.getDate() + 6);
-        weekEnd.setHours(23, 59, 59, 999);
-
-        const weekLabel = `${monthNames[weekStart.getMonth()]} ${weekStart.getDate()}`;
-        weeks.push(weekLabel);
-
-        promises.push(
-          Promise.all([
-            supabase
-              .from('post_public_view')
-              .select('*', { count: 'exact', head: true })
-              .eq('item_type', 'missing')
-              .gte('submission_date', weekStart.toISOString())
-              .lte('submission_date', weekEnd.toISOString()),
-            supabase
-              .from('post_public_view')
-              .select('*', { count: 'exact', head: true })
-              .eq('item_type', 'found')
-              .gte('submission_date', weekStart.toISOString())
-              .lte('submission_date', weekEnd.toISOString()),
-            supabase
-              .from('fraud_reports_table')
-              .select('*', { count: 'exact', head: true })
-              .in('report_status', ['open', 'under_review'])
-              .gte('date_reported', weekStart.toISOString())
-              .lte('date_reported', weekEnd.toISOString()),
-            supabase
-              .from('post_public_view')
-              .select('*', { count: 'exact', head: true })
-              .eq('post_status', 'pending')
-              .gte('submission_date', weekStart.toISOString())
-              .lte('submission_date', weekEnd.toISOString()),
-          ])
-        );
+      if (error) {
+        logger.error({ error }, 'Failed to fetch weekly stats');
+        throw new Error('Failed to fetch weekly stats');
       }
 
-      const results = await Promise.all(promises);
-
-      results.forEach(([missingRes, foundRes, reportsRes, pendingRes]) => {
-        missing.push(missingRes.count || 0);
-        found.push(foundRes.count || 0);
-        reports.push(reportsRes.count || 0);
-        pending.push(pendingRes.count || 0);
-      });
-
-      return { weeks, series: { missing, found, reports, pending } };
+      return buildWeeklyStatsResponse((data as WeeklyStatsRpcRow[] | null) || []);
     }
   );
 
@@ -707,7 +737,7 @@ export default async function adminRoutes(server: FastifyInstance, options: Admi
       },
     },
     async (request) => {
-      const supabase = getSupabaseClient();
+      const supabase = services.getSupabaseClient();
       const { start_date, end_date } = request.query;
 
       if (!start_date || !end_date) {

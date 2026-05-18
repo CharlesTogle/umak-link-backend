@@ -715,6 +715,17 @@ function isSessionWindowExpired(session: SessionRow, currentTime: Date): boolean
   return new Date(session.expires_at).getTime() <= currentTime.getTime();
 }
 
+function isScannedGuardReviewPending(
+  session: Pick<SessionRow, 'status' | 'scanned_by_guard_id'>,
+  attempt: Pick<AttemptRow, 'status'>
+): boolean {
+  return (
+    session.status === 'active' &&
+    attempt.status === 'open' &&
+    session.scanned_by_guard_id !== null
+  );
+}
+
 function getAbsoluteSessionDeadline(
   attempt: Pick<AttemptRow, 'created_at'>,
   absoluteSessionTtlSeconds: number
@@ -801,7 +812,9 @@ function buildSessionStatusResponse(
   currentTime: Date,
   maxSessionAttempts: number
 ): CustodySessionStatusResponse {
-  const currentWindowExpired = isSessionWindowExpired(session, currentTime);
+  const currentWindowExpired = isScannedGuardReviewPending(session, attempt)
+    ? false
+    : isSessionWindowExpired(session, currentTime);
 
   return {
     qr_code_session_id: session.qr_code_session_id,
@@ -1112,6 +1125,15 @@ async function resolveSessionExpiration(
   currentWindowExpired: boolean;
   finalizedTimeout: boolean;
 }> {
+  if (isScannedGuardReviewPending(session, attempt)) {
+    return {
+      session,
+      attempt,
+      currentWindowExpired: false,
+      finalizedTimeout: false,
+    };
+  }
+
   const currentWindowExpired =
     session.status === 'active' &&
     attempt.status === 'open' &&

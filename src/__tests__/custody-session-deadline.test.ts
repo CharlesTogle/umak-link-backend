@@ -354,9 +354,9 @@ test('scanCustodySession closes an overdue handover even if the current QR windo
   assert.equal(state.insertedRecords.length, 1);
 });
 
-test('decideCustodyAttempt rejects overdue scanned sessions before a guard can submit a decision', async () => {
+test('decideCustodyAttempt allows the scanning guard to finish a review after the QR expiry passes', async () => {
   const state = createLifecycleState({
-    custodyStatus: 'with_reporter',
+    custodyStatus: 'with_guard',
     session: {
       expires_at: '2026-05-14T10:16:30.000Z',
       scanned_by_guard_id: 'guard-1',
@@ -364,38 +364,35 @@ test('decideCustodyAttempt rejects overdue scanned sessions before a guard can s
     },
   });
 
-  await assert.rejects(
-    () =>
-      decideCustodyAttempt(
-        {
-          actor: {
-            user_id: 'guard-1',
-            email: 'guard-1@umak.edu.ph',
-            user_type: 'Guard',
-          },
-          custody_attempt_id: 'attempt-1',
-          qr_code_session_id: 'session-1',
-          decision: 'accepted',
-          decision_reason: 'Validated handover',
-        },
-        {
-          getSupabase: () => createLifecycleSupabase(state),
-          now: () => new Date('2026-05-14T10:15:01.000Z'),
-          absoluteSessionTtlSeconds: 15 * 60,
-          maxSessionAttempts: 5,
-          auditLogger: async () => {},
-        }
-      ),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.equal((error as Error & { statusCode?: number }).statusCode, 409);
-      assert.equal(error.message, 'Custody attempt is no longer active');
-      return true;
+  const response = await decideCustodyAttempt(
+    {
+      actor: {
+        user_id: 'guard-1',
+        email: 'guard-1@umak.edu.ph',
+        user_type: 'Guard',
+      },
+      custody_attempt_id: 'attempt-1',
+      qr_code_session_id: 'session-1',
+      decision: 'accepted',
+      decision_reason: 'Validated handover',
+    },
+    {
+      getSupabase: () => createLifecycleSupabase(state),
+      now: () => new Date('2026-05-14T10:15:01.000Z'),
+      absoluteSessionTtlSeconds: 15 * 60,
+      maxSessionAttempts: 5,
+      auditLogger: async () => {},
     }
   );
 
-  assert.equal(state.attempt.status, 'timed_out');
-  assert.equal(state.session.status, 'expired');
+  assert.equal(response.attempt_status, 'accepted');
+  assert.equal(response.qr_status, 'accepted');
+  assert.equal(response.custody_status, 'with_guard');
+  assert.equal(state.attempt.status, 'accepted');
+  assert.equal(state.attempt.decision_by_guard_id, 'guard-1');
+  assert.equal(state.session.status, 'accepted');
+  assert.equal(state.insertedRecords.length, 1);
+  assert.equal(state.insertedRecords[0]?.record_type, 'guard_accepted');
 });
 
 test('expireCustodySessions times out active sessions that cross the absolute deadline before QR expiry', async () => {
@@ -420,4 +417,29 @@ test('expireCustodySessions times out active sessions that cross the absolute de
   assert.equal(state.attempt.status, 'timed_out');
   assert.equal(state.session.status, 'expired');
   assert.equal(state.insertedRecords.length, 1);
+});
+
+test('expireCustodySessions leaves scanned sessions open while the guard review is pending', async () => {
+  const state = createLifecycleState({
+    session: {
+      expires_at: '2026-05-14T10:16:30.000Z',
+      scanned_by_guard_id: 'guard-1',
+      scanned_at: '2026-05-14T10:14:45.000Z',
+    },
+  });
+
+  const response = await expireCustodySessions({
+    getSupabase: () => createLifecycleSupabase(state),
+    now: () => new Date('2026-05-14T10:15:01.000Z'),
+    absoluteSessionTtlSeconds: 15 * 60,
+    maxSessionAttempts: 5,
+    auditLogger: async () => {},
+  });
+
+  assert.deepEqual(response, {
+    expired_count: 0,
+  });
+  assert.equal(state.attempt.status, 'open');
+  assert.equal(state.session.status, 'active');
+  assert.equal(state.insertedRecords.length, 0);
 });

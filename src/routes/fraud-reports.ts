@@ -11,15 +11,7 @@ import logger from '../utils/logger.js';
 import { parsePagination } from '../utils/pagination.js';
 import { logAudit, getUserName } from '../utils/audit-logger.js';
 import { createHttpError, normalizeUpstreamError } from '../utils/http-error.js';
-
-function formatAuditLabel(value: string | null | undefined): string {
-  if (!value) return 'Unknown';
-
-  return value
-    .split('_')
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(' ');
-}
+import { getFraudReportStatusAuditEntry } from '../utils/fraud-report-audit.js';
 
 export default async function fraudReportsRoutes(server: FastifyInstance) {
   // GET /fraud-reports/check-duplicates - Check for duplicate reports
@@ -349,23 +341,12 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
       const staffName = await getUserName(staffId);
       const timestamp = new Date().toISOString();
       const deleteClaim = false;
-
-      let actionType = '';
-      let message = '';
-
-      if (status === 'resolved') {
-        actionType = 'fraud_report_resolved';
-        message = `${staffName} resolved fraud report ${reportId}`;
-      } else if (status === 'rejected') {
-        actionType = 'fraud_report_rejected';
-        message = `${staffName} rejected fraud report ${reportId}`;
-      } else if (status === 'open') {
-        actionType = 'fraud_report_marked_open';
-        message = `${staffName} opened fraud report ${reportId}`;
-      } else {
-        actionType = 'fraud_report_status_changed';
-        message = `${staffName} changed fraud report ${reportId} to ${formatAuditLabel(status)}`;
-      }
+      const { actionType, message } = getFraudReportStatusAuditEntry({
+        staffName,
+        reportId,
+        status,
+        reportTitle: reportData.item_name,
+      });
 
       await logAudit({
         userId: staffId,
@@ -373,6 +354,7 @@ export default async function fraudReportsRoutes(server: FastifyInstance) {
         details: {
           message,
           report_id: reportId,
+          report_title: reportData.item_name ?? null,
           post_id: reportData.post_id?.toString(),
           old_status: reportData.report_status,
           new_status: status,

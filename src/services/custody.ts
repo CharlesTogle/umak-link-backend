@@ -1323,8 +1323,13 @@ export async function createCustodyAttempt(
 
   if ((recentSessionLoopCount ?? 0) >= maxSessionLoopsPerHour) {
     throw createHttpError(
-      'Too many custody handover sessions started for this post. Try again later.',
-      429
+      `You can only attempt handover ${maxSessionLoopsPerHour} ${
+        maxSessionLoopsPerHour === 1 ? 'time' : 'times'
+      } in 1 hour. Please try again later.`,
+      429,
+      {
+        code: 'CUSTODY_HANDOVER_LIMIT_REACHED',
+      }
     );
   }
 

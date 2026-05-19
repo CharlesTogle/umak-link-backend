@@ -89,7 +89,7 @@ test('normalizeUpstreamError uses the fallback contract for unknown errors', () 
   assert.equal(error.message, 'Search unavailable');
 });
 
-test('buildApiErrorResponse returns only safe frontend-facing fields', () => {
+test('buildApiErrorResponse preserves safe 4xx messages for frontend consumers', () => {
   const response = buildApiErrorResponse(
     createHttpError('Only admins can search users', 429, {
       retryAfterSeconds: 7,
@@ -101,9 +101,24 @@ test('buildApiErrorResponse returns only safe frontend-facing fields', () => {
     statusCode: 429,
     error: 'Rate Limited',
     code: 'RATE_LIMITED',
-    message: 'Rate Limited',
+    message: 'Only admins can search users',
     requestId: 'req-123',
     retryAfterSeconds: 7,
+  });
+});
+
+test('buildApiErrorResponse keeps 5xx HttpError messages generic', () => {
+  const response = buildApiErrorResponse(
+    createHttpError('Custody automation staff user is invalid', 500),
+    'req-500'
+  );
+
+  assert.deepEqual(response, {
+    statusCode: 500,
+    error: 'Internal Server Error',
+    code: 'INTERNAL_SERVER_ERROR',
+    message: 'Internal Server Error',
+    requestId: 'req-500',
   });
 });
 

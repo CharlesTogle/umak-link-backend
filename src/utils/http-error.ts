@@ -175,11 +175,17 @@ export function buildApiErrorResponse(
     ? error.code
     : getErrorCodeForStatus(statusCode);
 
+  const safeMessage = isHttpError(error)
+    ? statusCode < 500
+      ? error.message || errorTitle
+      : errorTitle
+    : getErrorTitleForStatus(statusCode);
+
   const response: ApiError = {
     statusCode,
     error: errorTitle,
     code,
-    message: errorTitle,
+    message: safeMessage,
   };
 
   if (requestId) {

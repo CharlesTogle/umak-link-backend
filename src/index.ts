@@ -30,11 +30,62 @@ import staffCustodyRoutes from './routes/staff-custody.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
+const DEFAULT_RATE_LIMIT_MAX = 500;
+const DEFAULT_RATE_LIMIT_TIME_WINDOW = '1 minute';
 const configuredAllowedOrigins = process.env.ALLOWED_ORIGINS || '';
 const ALLOWED_ORIGINS = configuredAllowedOrigins;
 const ALLOWED_ORIGIN_LIST = ALLOWED_ORIGINS.split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+
+function parseBooleanEnv(value: string | undefined): boolean | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+
+  if (['false', '0', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  logger.warn({ value }, 'Invalid boolean environment value');
+  return null;
+}
+
+function parseRateLimitEnabled(): boolean {
+  const configuredValue = parseBooleanEnv(process.env.RATE_LIMIT_ENABLED);
+  if (configuredValue !== null) {
+    return configuredValue;
+  }
+
+  return process.env.NODE_ENV !== 'development';
+}
+
+function parseRateLimitMax(): number {
+  const raw = process.env.RATE_LIMIT_MAX;
+  if (!raw) {
+    return DEFAULT_RATE_LIMIT_MAX;
+  }
+
+  const parsed = parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed < 1) {
+    logger.warn(
+      { value: raw, fallback: DEFAULT_RATE_LIMIT_MAX },
+      'Invalid RATE_LIMIT_MAX, using default value'
+    );
+    return DEFAULT_RATE_LIMIT_MAX;
+  }
+
+  return parsed;
+}
+
+const RATE_LIMIT_ENABLED = parseRateLimitEnabled();
+const RATE_LIMIT_MAX = parseRateLimitMax();
+const RATE_LIMIT_TIME_WINDOW = process.env.RATE_LIMIT_TIME_WINDOW || DEFAULT_RATE_LIMIT_TIME_WINDOW;
 
 function validateStartupConfig() {
   if (!process.env.GOOGLE_CLIENT_ID) {
@@ -94,10 +145,18 @@ await server.register(cors, {
   credentials: true,
 });
 
-await server.register(rateLimit, {
-  max: 100,
-  timeWindow: '1 minute',
-});
+if (RATE_LIMIT_ENABLED) {
+  await server.register(rateLimit, {
+    max: RATE_LIMIT_MAX,
+    timeWindow: RATE_LIMIT_TIME_WINDOW,
+  });
+  logger.info(
+    { max: RATE_LIMIT_MAX, timeWindow: RATE_LIMIT_TIME_WINDOW },
+    'Global rate limiting enabled'
+  );
+} else {
+  logger.warn('Global rate limiting disabled');
+}
 
 // Health check route
 server.get('/health', async () => {

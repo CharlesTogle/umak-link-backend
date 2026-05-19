@@ -21,7 +21,7 @@ test('global error handler serializes safe 403 responses', async () => {
     statusCode: 403,
     error: 'Forbidden',
     code: 'FORBIDDEN',
-    message: 'Forbidden',
+    message: 'Only staff can do this action',
     requestId: response.json().requestId,
   });
   assert.equal(typeof response.json().requestId, 'string');
@@ -49,7 +49,7 @@ test('global error handler sets Retry-After and safe 429 payloads', async () => 
     statusCode: 429,
     error: 'Rate Limited',
     code: 'RATE_LIMITED',
-    message: 'Rate Limited',
+    message: 'Too many requests for this action',
     requestId: response.json().requestId,
     retryAfterSeconds: 5,
   });

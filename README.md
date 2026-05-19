@@ -175,6 +175,9 @@ Custody-related backend variables:
 - `CUSTODY_QR_TTL_SECONDS`: optional, defaults to `300`
 - `CUSTODY_QR_MAX_ATTEMPTS`: optional, defaults to `5`
 - `CUSTODY_SESSION_LIMIT_PER_HOUR`: optional, defaults to `2`
+- `RATE_LIMIT_ENABLED`: optional, defaults to `false` in development and `true` otherwise
+- `RATE_LIMIT_MAX`: optional, defaults to `500`
+- `RATE_LIMIT_TIME_WINDOW`: optional, defaults to `1 minute`
 
 ## Deployment
 
@@ -211,7 +214,7 @@ The stale-accepted custody escalation job depends on:
 - All sensitive keys (Supabase service role, Gemini API) stay server-side
 - JWT tokens expire after 7 days by default
 - Role-based access control (User/Staff/Admin)
-- Rate limiting enabled (100 req/min per IP)
+- Rate limiting enabled outside development by default (`500 req/min` per IP unless overridden)
 - CORS configured (update `ALLOWED_ORIGINS` for production)
 - Helmet.js security headers
 

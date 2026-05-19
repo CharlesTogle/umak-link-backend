@@ -768,6 +768,132 @@ test(`createCustodyAttempt rejects posts already in ${custodyStatus}`, async () 
   });
 }
 
+test('createCustodyAttempt returns a custody-specific 429 when the hourly handover limit is reached', async () => {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'post_public_view') {
+        return {
+          select(columns: string) {
+            assert.equal(
+              columns,
+              'post_id, item_id, poster_id, item_type, post_status, custody_status'
+            );
+
+            return {
+              eq(column: string, value: number) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, baseInput.post_id);
+
+                return {
+                  async single() {
+                    return {
+                      data: {
+                        post_id: 42,
+                        item_id: 'item-1',
+                        poster_id: 'user-1',
+                        item_type: 'found',
+                        post_status: 'accepted',
+                        custody_status: 'with_reporter',
+                      },
+                      error: null,
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (table === 'custody_attempt_table') {
+        return {
+          select(columns: string, options?: { count?: 'exact'; head?: boolean }) {
+            if (options?.count === 'exact' && options.head === true) {
+              assert.equal(columns, 'custody_attempt_id');
+
+              return {
+                eq(column: string, value: number | string) {
+                  assert.equal(column, 'post_id');
+                  assert.equal(value, baseInput.post_id);
+
+                  return {
+                    eq(nextColumn: string, nextValue: string) {
+                      assert.equal(nextColumn, 'poster_id');
+                      assert.equal(nextValue, baseInput.actor.user_id);
+
+                      return {
+                        async gte(finalColumn: string, finalValue: string) {
+                          assert.equal(finalColumn, 'created_at');
+                          assert.equal(typeof finalValue, 'string');
+
+                          return {
+                            count: 5,
+                            error: null,
+                          };
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            }
+
+            assert.equal(columns, 'custody_attempt_id');
+            assert.equal(options, undefined);
+
+            return {
+              eq(column: string, value: number | string) {
+                assert.equal(column, 'post_id');
+                assert.equal(value, baseInput.post_id);
+
+                return {
+                  eq(nextColumn: string, nextValue: string) {
+                    assert.equal(nextColumn, 'status');
+                    assert.equal(nextValue, 'open');
+
+                    return {
+                      async maybeSingle() {
+                        return {
+                          data: null,
+                          error: null,
+                        };
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table access: ${table}`);
+    },
+  } as never;
+
+  await assert.rejects(
+    () =>
+      createCustodyAttempt(baseInput, {
+        getSupabase: () => fakeSupabase,
+        now: () => new Date('2026-05-14T11:20:00.000Z'),
+        maxSessionLoopsPerHour: 5,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { statusCode?: number }).statusCode, 429);
+      assert.equal(
+        error.message,
+        'You can only attempt handover 5 times in 1 hour. Please try again later.'
+      );
+      assert.equal(
+        (error as Error & { code?: string }).code,
+        'CUSTODY_HANDOVER_LIMIT_REACHED'
+      );
+      return true;
+    }
+  );
+});
+
 test('updatePostCustodyStatus updates claimed found item custody and writes poster-visible history', async () => {
   const insertedRecords: Array<Record<string, unknown>> = [];
   let capturedAuditDetails: Record<string, unknown> | null = null;

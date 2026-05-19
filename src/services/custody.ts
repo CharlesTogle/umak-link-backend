@@ -2585,6 +2585,10 @@ export async function scanCustodySession(
   session = expirationResult.session;
   attempt = expirationResult.attempt;
 
+  if (isScannedGuardReviewPending(session, attempt) && isSessionWindowExpired(session, currentTime)) {
+    throw createHttpError('QR session expired. Generate a new QR for this handover session.', 409);
+  }
+
   if (expirationResult.currentWindowExpired && !expirationResult.finalizedTimeout) {
     throw createHttpError('QR session expired. Generate a new QR for this handover session.', 409);
   }

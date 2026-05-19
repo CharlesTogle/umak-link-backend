@@ -354,6 +354,47 @@ test('scanCustodySession closes an overdue handover even if the current QR windo
   assert.equal(state.insertedRecords.length, 1);
 });
 
+test('scanCustodySession rejects rescanning an expired session that is already under guard review', async () => {
+  const state = createLifecycleState({
+    session: {
+      expires_at: '2026-05-14T10:14:45.000Z',
+      scanned_by_guard_id: 'guard-1',
+      scanned_at: '2026-05-14T10:14:40.000Z',
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      scanCustodySession(
+        {
+          actor: {
+            user_id: 'guard-1',
+            email: 'guard-1@umak.edu.ph',
+            user_type: 'Guard',
+          },
+          manual_entry_code: 'AB2C3D',
+        },
+        {
+          getSupabase: () => createLifecycleSupabase(state),
+          now: () => new Date('2026-05-14T10:15:01.000Z'),
+          absoluteSessionTtlSeconds: 15 * 60,
+          maxSessionAttempts: 5,
+          auditLogger: async () => {},
+        }
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { statusCode?: number }).statusCode, 409);
+      assert.equal(error.message, 'QR session expired. Generate a new QR for this handover session.');
+      return true;
+    }
+  );
+
+  assert.equal(state.attempt.status, 'open');
+  assert.equal(state.session.status, 'active');
+  assert.equal(state.insertedRecords.length, 0);
+});
+
 test('decideCustodyAttempt allows the scanning guard to finish a review after the QR expiry passes', async () => {
   const state = createLifecycleState({
     custodyStatus: 'with_guard',
